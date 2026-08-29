@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stat-arb-pairs"
+version = "0.1.0"
+description = "Research slice: Engle-Granger cointegration pairs trading with costs and walk-forward evaluation."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "M.Varun" }]
+dependencies = [
+    "pandas",
+    "numpy",
+    "scipy",
+    "statsmodels",
+    "scikit-learn",
+    "yfinance",
+    "pytest",
+    "jupyter",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

@@ -3,9 +3,10 @@
 Trading in this slice uses Engle-Granger only: OLS of y on x, then a residual
 ADF/coint test via ``statsmodels.tsa.stattools.coint``.
 
-Johansen (``coint_johansen``) is a diagnostic. We return the library's trace
-statistics and critical values as-is. We do not invent "cointegrated = True"
-flags or feed Johansen vectors into the book.
+Johansen (``coint_johansen``) is a diagnostic, and a confirmation filter after
+BH in ``statarb.screening``. We return the library's trace statistics and
+critical values as-is. We do not invent p-values or feed Johansen vectors into
+the book.
 """
 
 from __future__ import annotations

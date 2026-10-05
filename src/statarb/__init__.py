@@ -8,6 +8,7 @@ eigenvectors into positions.
 from .backtest import backtest_spread, expanding_walk_forward, walk_forward
 from .cointegration import EngleGrangerResult, JohansenResult, engle_granger, johansen
 from .data import download_pair, load_csv
+from .kalman import kalman_hedge, static_hedge_path
 from .params import (
     ANNUALIZATION,
     MIN_TRAIN_OBS,
@@ -41,8 +42,10 @@ __all__ = [
     "engle_granger",
     "expanding_walk_forward",
     "johansen",
+    "kalman_hedge",
     "load_csv",
     "mean_reversion_positions",
     "rolling_zscore",
+    "static_hedge_path",
     "walk_forward",
 ]

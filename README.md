@@ -69,6 +69,68 @@ In-sample (train) metrics are shown because they are the usual way to fool yours
 
 Cointegration is a sample property. A KO/PEP residual that looks stationary through one decade can stop mean-reverting on a sugar-tax scare, a spin-off, a rates regime, or a year where one name re-rates on multiple while the other does not. Costs that look small in 5+5 bps still dominate a low-Sharpe spread once you actually turn the book; our defaults are a guess, not an exchange tape. The close-to-close z-score rule still has a look-ahead flavour: we assume the close is tradable at the close. Yahoo adjusted closes are **not a research-grade tape** \u2014 corporate actions, dividends, and error fills are whoever Yahoo had that day; survivorship is not modelled (both names are alive, liquid mega-caps); liquidity, borrow, and overnight gaps are not modelled. A walk-forward Sharpe on one pair after one split is still compatible with luck. None of this is live PnL.
 
+## Oct 5 slice: OU half-life, Kalman hedge, multiple-testing screen, rolling walk-forward
+
+All numbers below are **synthetic, seeded and offline** (`src/statarb/synth.py` plants the hedge ratio,
+intercept and OU half-life, so every estimate can be checked against the truth). Reproduce with
+`python scripts/run_oct05_experiments.py`. None of this is a claim about live markets.
+
+### Method
+
+| Module | What it does |
+| --- | --- |
+| `synth` | Cointegrated pairs `y = c + beta_t x + s`, with `s` an AR(1) spread whose half-life is exact (`rho = 0.5**(1/hl)`); random-walk universes where every pair is a false pair; universes with planted true pairs |
+| `ou` | AR(1) fit of the spread: half-life, stationary std, entry/exit levels at `mu +/- z*sigma_eq`, and a `3 x half-life` time stop |
+| `kalman` | Random-walk state `(alpha, beta)` filter, initialised by OLS on a warm-up window. Signal is the innovation z-score (prior state, never sees bar t) |
+| `screening` | Engle-Granger both orderings (max p), Benjamini-Hochberg FDR at 5%, Johansen trace as a confirmation, and a summary of false positives / power / FDP per rule |
+| `formation` | Non-overlapping 252-bar formation / 63-bar trading blocks. Static OLS beta frozen per block vs Kalman beta updated each bar. Forced flat at block end. Costs: 10 bps per leg per unit change, plus a re-hedge charge when the Kalman beta moves while a position is held |
+
+### Results (20 seeds unless noted)
+
+OU half-life recovery on 1,500 bars: planted 5 / 10 / 20 bars, median estimate 5.02 / 10.10 / 19.96
+(10th to 90th percentile 4.6 to 5.6, 8.9 to 11.7, 16.6 to 22.4).
+
+Hedge tracking when beta drifts linearly from 1.0 to 2.5: median beta RMSE 0.215 for Kalman vs 0.990
+for a beta frozen at the warm-up OLS.
+
+Pair screening, 190 candidate pairs per universe, 10 seeds:
+
+| Rule | False pairs per pure-noise universe | Power (4 planted pairs) | FDP with planted pairs |
+| --- | --- | --- | --- |
+| EG one ordering, p < 0.05 | 8.5 | 1.000 | 0.748 |
+| EG both orderings, p < 0.05 | 3.6 | 1.000 | 0.513 |
+| Johansen trace alone, 95% | 18.8 | 1.000 | 0.859 |
+| EG + Benjamini-Hochberg | 0.0 | 0.975 | 0.000 |
+| BH + Johansen confirm | 0.0 | 0.975 | 0.000 |
+
+Rolling walk-forward, net of costs (half-life 5, 12 trading blocks):
+
+| Scenario | Median Sharpe, static OLS | Median Sharpe, Kalman | Kalman wins | Median total return, static / Kalman |
+| --- | --- | --- | --- | --- |
+| Constant beta | 0.50 | -0.08 | 1/20 | 1.8% / -0.2% |
+| Beta drifts 1.0 to 2.5 | -1.29 | -1.09 | 15/20 | -21.0% / -16.4% |
+
+Reading: Kalman tracks a moving hedge far better and loses less than a stale static hedge, but **both
+books lose money after costs when beta drifts this fast**, and when beta is truly constant the filter's
+extra flexibility only adds noise; it also trades about half as often (median 7 vs 15 entries). Better beta tracking is not the same as a
+tradable edge.
+
+### What the tests check
+
+- OU fit recovers planted half-lives; thresholds and time stop are well defined only when `0 < b < 1`.
+- Kalman is causal (a future shock does not move past estimates) and beats static OLS on drifting beta.
+- On pure random-walk universes, BH keeps false discoveries near zero where naive p < 0.05 does not.
+- Walk-forward: no trading inside the first formation window, flat at every block end, a break in a
+  later block does not change earlier returns, costs are monotone, zero cost equals gross PnL,
+  a hand-computed 3-bar PnL, and seed sweeps for both hedge scenarios (not one lucky seed).
+
+### Weaknesses
+
+- Synthetic only: no real-pair universe has been screened yet, so there is no out-of-sample market result.
+- Kalman `q_beta` / `q_alpha` are fixed defaults, not tuned in a nested walk-forward.
+- The walk-forward trades one known pair; it does not yet re-screen the universe in each formation window.
+- Costs are bps on gross notional; no borrow, no market impact, closes only.
+
 ## Install
 
 ```bash
@@ -100,7 +162,8 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 ## Layout
 
 ```
-src/statarb/     cointegration, signals, backtest, data
+src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation
+scripts/         run_oct05_experiments.py (reproduces the Oct 5 tables)
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)
@@ -108,4 +171,4 @@ data/            make_sample.py + sample_ko_pep.csv (sample, not live)
 
 ## What is still out of scope
 
-Kalman / rolling \u03b2 as the primary hedge, Johansen-traded eigenvectors, universe search, multiple-testing control, execution at the open, borrow, taxes, and any claim that a backtest Sharpe survives contact with a broker.
+Johansen-traded eigenvectors, re-screening the universe inside each formation window, nested tuning of the Kalman noise, execution at the open, borrow, taxes, and any claim that a backtest Sharpe survives contact with a broker.

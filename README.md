@@ -131,6 +131,97 @@ tradable edge.
 - The walk-forward trades one known pair; it does not yet re-screen the universe in each formation window.
 - Costs are bps on gross notional; no borrow, no market impact, closes only.
 
+
+## Oct 9 slice: per-window universe re-screening and nested Kalman q tune
+
+Oct 5 traded one known pair and used fixed Kalman noise. This slice closes those
+two gaps on the same synthetic generators. Reproduce with
+`python scripts/run_oct09_experiments.py`. Still synthetic, seeded and offline —
+not a live-market claim.
+
+### Method
+
+| Module | What it does |
+| --- | --- |
+| `rescreen` | Each 252-bar formation window runs `screen_pairs` on the full universe; only discoveries of a chosen rule (`naive_single`, `naive`, `bh`, `bh_johansen`) are traded in the next 63-bar block. Equal-weight across discoveries; flat when none; forced flat at block end |
+| `nested` | Outer 252/63 walk-forward. Inside each formation window, roll 84/21 blocks over a log-spaced `q_beta` grid `(1e-8 … 1e-4)`, pick the median-net-Sharpe winner, trade the outer block with that `q_beta`. `q_alpha` stays at the package default |
+
+Causality: screening, OLS/Kalman warm-up and the inner q grid never see an outer
+trading bar. A break planted in a later block does not change earlier returns or
+earlier chosen `q_beta`.
+
+### Results
+
+Re-screen on pure noise (12 independent random walks, 66 candidate pairs, 8
+blocks, 10 seeds), net of 10 bps/leg:
+
+| Rule | Median discoveries / window | Median frac windows traded | Median Sharpe | Median total return | Median cost paid |
+| --- | --- | --- | --- | --- | --- |
+| EG one ordering, p < 0.05 | 3.06 | 0.81 | -0.27 | -4.0% | 0.031 |
+| EG both orderings, p < 0.05 | 0.81 | 0.62 | -0.16 | -2.5% | 0.023 |
+| EG + Benjamini-Hochberg | 0.00 | 0.00 | 0.00 | 0.0% | 0.000 |
+| BH + Johansen confirm | 0.00 | 0.00 | 0.00 | 0.0% | 0.000 |
+
+Reading: without FDR control the walk-forward *trades* the false pairs and
+pays for them. BH keeps the book flat on pure noise (median), so the cost of
+multiple testing shows up as turnover rather than as a screen-time footnote.
+
+Re-screen with 3 planted pairs + 10 noise assets (10 seeds):
+
+| Rule | Median discoveries / window | Median frac windows traded | Median Sharpe | Median total return |
+| --- | --- | --- | --- | --- |
+| EG both, p < 0.05 | 4.38 | 1.00 | 0.54 | 2.6% |
+| EG + BH | 0.81 | 0.50 | 0.29 | 0.7% |
+| BH + Johansen | 0.81 | 0.50 | 0.29 | 0.7% |
+
+Oracle (trade one known planted pair, static OLS) vs BH-rescreened universe book
+(10 seeds):
+
+| Book | Median Sharpe | Median total return | Median discoveries / window |
+| --- | --- | --- | --- |
+| Oracle known pair | 0.33 | 0.9% | 1.00 |
+| BH re-screen universe | 0.45 | 0.5% | 0.75 |
+
+BH's higher median Sharpe with a *lower* total return is the flat-window effect:
+roughly half the blocks do nothing, so the Sharpe denominator shrinks while the
+compounded return stays smaller than the always-on oracle. Power is real but
+incomplete — median discoveries stay below the three planted pairs.
+
+Nested vs fixed Kalman `q_beta` (12 seeds, 8 blocks, half-life 5), net of costs:
+
+| Scenario | Median Sharpe, fixed `1e-6` | Median Sharpe, nested | Nested wins | Median return, fixed / nested | Median chosen `q_beta` |
+| --- | --- | --- | --- | --- | --- |
+| Constant beta | 0.15 | 0.15 | 4/12 | 0.1% / 0.2% | `1e-6` (11/12 seeds) |
+| Beta drifts 1.0 to 2.5 | -1.79 | -1.32 | 9/12 | -21.9% / -8.2% | `1e-5` (7) or `1e-4` (3) |
+
+Reading: when beta is truly constant the inner search almost always keeps the
+default, so nested and fixed are the same book. When beta drifts, the tune
+moves `q_beta` up and loses less than the stale default — but **both books still
+lose money after costs** on this drift speed. Nested tuning is not a free edge;
+it is a less-bad hedge under misspecification.
+
+### What the tests check
+
+- Re-screen: no trading inside the first formation window, future breaks do not
+  change earlier returns or discovery counts, costs are monotone, BH trades less
+  than naive on pure noise, planted pairs produce trades, empty discoveries stay
+  flat.
+- Nested: grid coverage, short-sample fallback to `Q_BETA`, future breaks do not
+  change earlier chosen `q` or returns, formation-only tuning, monotone costs,
+  fixed path matches a direct `formation_trading_backtest` with the default q.
+
+### Weaknesses
+
+- Still synthetic only: no real-pair universe has been screened, and no cited
+  public tape is bundled offline yet.
+- Re-screen equal-weights every discovery; it does not rank by half-life, EG p,
+  or estimated Sharpe, and it does not cap the number of concurrent pairs.
+- Nested grid is coarse (5 points) and scores by Sharpe on short inner blocks;
+  that score is noisy, and `q_alpha` is never tuned.
+- Drift scenario still loses money after costs even with the tuned q; a slower
+  drift or a different signal rule was not tried.
+- Costs remain bps on gross notional; no borrow, no impact, closes only.
+
 ## Install
 
 ```bash
@@ -162,8 +253,8 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 ## Layout
 
 ```
-src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation
-scripts/         run_oct05_experiments.py (reproduces the Oct 5 tables)
+src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested
+scripts/         run_oct05_experiments.py, run_oct09_experiments.py
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)
@@ -171,4 +262,4 @@ data/            make_sample.py + sample_ko_pep.csv (sample, not live)
 
 ## What is still out of scope
 
-Johansen-traded eigenvectors, re-screening the universe inside each formation window, nested tuning of the Kalman noise, execution at the open, borrow, taxes, and any claim that a backtest Sharpe survives contact with a broker.
+Johansen-traded eigenvectors, ranking or capping re-screened discoveries, joint tuning of `q_alpha` with `q_beta`, execution at the open, borrow, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker.

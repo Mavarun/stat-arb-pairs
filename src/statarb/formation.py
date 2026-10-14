@@ -136,8 +136,14 @@ def formation_trading_backtest(
     n_legs: int = N_LEGS,
     q_beta: float = Q_BETA,
     q_alpha: float = Q_ALPHA,
+    use_time_stop: bool = False,
+    time_stop_multiple: float = 3.0,
 ) -> FormationResult:
-    """Roll formation/trading windows over the whole sample; see module docstring."""
+    """Roll formation/trading windows over the whole sample; see module docstring.
+
+    ``use_time_stop`` fits an OU on the *formation* residual and flattens any
+    position held longer than ``ceil(time_stop_multiple * half_life)`` bars.
+    """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
     ).dropna().sort_index()
@@ -162,8 +168,18 @@ def formation_trading_backtest(
         z, beta, beta_f = _window_signal(
             yv[f_sl], xv[f_sl], yv[t_sl], xv[t_sl], hedge, q_beta, q_alpha
         )
+        max_hold = None
+        if use_time_stop:
+            from .ou import fit_ou
+            from .rank import formation_residual
+
+            try:
+                fit = fit_ou(formation_residual(yv[f_sl], xv[f_sl]))
+                max_hold = fit.max_hold(time_stop_multiple)
+            except ValueError:
+                max_hold = None
         pos = mean_reversion_positions(
-            pd.Series(z), z_enter=z_enter, z_exit=z_exit
+            pd.Series(z), z_enter=z_enter, z_exit=z_exit, max_hold=max_hold
         ).to_numpy(dtype=float, copy=True)
         pos[-1] = 0.0  # forced flat at block end
         g, c, rh = _block_pnl(yv[t_sl], xv[t_sl], pos, beta, rate, n_legs)

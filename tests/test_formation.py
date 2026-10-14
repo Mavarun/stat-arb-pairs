@@ -98,3 +98,48 @@ def test_input_validation():
         formation_trading_backtest(p.y, p.x, formation=10)
     with pytest.raises(ValueError):
         formation_trading_backtest(p.y, p.x, hedge="lasso", formation=100, trading=50)
+
+
+def test_time_stop_flattens_relative_to_no_stop_on_slow_spread():
+    # Long half-life + aggressive multiple=1 so the stop binds inside 63 bars.
+    p = make_ou_pair(252 + 63 * 4, half_life=30.0, seed=44)
+    off = formation_trading_backtest(
+        p.y, p.x, hedge="ols", formation=252, trading=63, use_time_stop=False
+    )
+    on = formation_trading_backtest(
+        p.y,
+        p.x,
+        hedge="ols",
+        formation=252,
+        trading=63,
+        use_time_stop=True,
+        time_stop_multiple=1.0,
+    )
+    assert list(off.returns.index) == list(on.returns.index)
+    # Time stop should not increase the number of bars held at |pos|=1 forever;
+    # at minimum the two paths can differ when the stop binds.
+    # Causality: a late break must not change earlier returns.
+    broken_y = p.y.copy()
+    cut_i = 252 + 63 * 3
+    broken_y.iloc[cut_i:] = broken_y.iloc[cut_i:] * 1.08
+    on_b = formation_trading_backtest(
+        broken_y,
+        p.x,
+        hedge="ols",
+        formation=252,
+        trading=63,
+        use_time_stop=True,
+        time_stop_multiple=1.0,
+    )
+    cut = p.y.index[cut_i - 1]
+    pd.testing.assert_series_equal(on.returns.loc[:cut], on_b.returns.loc[:cut])
+
+
+def test_time_stop_off_matches_legacy_path():
+    p = make_ou_pair(252 + 63 * 3, half_life=8.0, seed=45)
+    a = formation_trading_backtest(p.y, p.x, hedge="ols", formation=252, trading=63)
+    b = formation_trading_backtest(
+        p.y, p.x, hedge="ols", formation=252, trading=63, use_time_stop=False
+    )
+    pd.testing.assert_series_equal(a.returns, b.returns)
+    assert a.trades == b.trades

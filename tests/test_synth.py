@@ -73,3 +73,30 @@ def test_planted_universe_truth_and_shape():
         ols = sm.OLS(df[a], sm.add_constant(df[b])).fit()
         assert ols.resid.std() < 2.0
     assert n_pairs(12) == 66
+
+
+def test_make_planted_universe_accepts_per_pair_half_lives():
+    from statarb.ou import fit_ou
+    from statarb.cointegration import engle_granger
+    from statarb.signals import compute_spread
+
+    # Long enough that the slow (25-bar) half-life is identifiable after EG.
+    frame, truth = make_planted_universe(
+        4, 2, 1500, half_life=(5.0, 25.0), seed=21
+    )
+    assert len(truth) == 2
+    assert {"P0Y", "P0X", "P1Y", "P1X"}.issubset(set(frame.columns))
+    recovered = []
+    for k, planted in enumerate((5.0, 25.0)):
+        y, x = frame[f"P{k}Y"], frame[f"P{k}X"]
+        eg = engle_granger(y, x)
+        hl = fit_ou(compute_spread(y, x, eg.hedge_ratio, eg.intercept)).half_life
+        recovered.append(hl)
+        # Small-sample OU bias is downward; allow 40% relative error.
+        assert abs(hl - planted) / planted < 0.40
+    assert recovered[0] < recovered[1]
+
+
+def test_make_planted_universe_rejects_mismatched_half_life_length():
+    with pytest.raises(ValueError, match="half_life sequence"):
+        make_planted_universe(4, 3, 200, half_life=(5.0, 10.0), seed=0)

@@ -3,13 +3,18 @@
 The Oct 5 walk-forward traded one *known* pair. This module screens the full
 price universe inside each formation window, then trades only the discoveries
 of a chosen rule (BH, BH+Johansen, or naive EG) in the following trading
-block. Positions are equal-weighted across discoveries and forced flat at
-block end so nothing leaks across windows.
+block. Positions are equal-weighted across the (optionally ranked and capped)
+selection and forced flat at block end so nothing leaks across windows.
+
+Oct 14 adds ``rank_by`` / ``max_pairs``: discoveries can be ordered by EG p,
+OU half-life, or a composite score and truncated before equal-weighting.
+Ranking uses formation residuals only.
 
 Causality contract:
 
-* Screening and hedge estimation use formation bars only.
-* Trading bars never enter the screen, the OLS fit, or the Kalman warm-up.
+* Screening, ranking and hedge estimation use formation bars only.
+* Trading bars never enter the screen, the rank score, the OLS fit, or the
+  Kalman warm-up.
 * A break planted inside a later trading block must not change earlier returns.
 """
 
@@ -22,10 +27,11 @@ import pandas as pd
 
 from .backtest import _max_drawdown, _sharpe
 from .formation import FORMATION, TRADING, _block_pnl, _window_signal
+from .kalman import Q_ALPHA, Q_BETA
 from .params import N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
+from .rank import RANK_KEYS, select_top
 from .screening import RULES, screen_pairs
 from .signals import mean_reversion_positions
-from .kalman import Q_ALPHA, Q_BETA
 
 RULE_CHOICES = RULES  # re-export for callers
 
@@ -44,7 +50,10 @@ class RescreenResult:
     cost_paid: float
     rehedge_cost: float
     mean_discoveries: float
+    mean_selected: float
     frac_windows_traded: float
+    rank_by: str
+    max_pairs: float
     returns: pd.Series = field(repr=False)
     windows: pd.DataFrame = field(repr=False)
 
@@ -58,7 +67,9 @@ class RescreenResult:
             "cost_paid": self.cost_paid,
             "rehedge_cost": self.rehedge_cost,
             "mean_discoveries": self.mean_discoveries,
+            "mean_selected": self.mean_selected,
             "frac_windows_traded": self.frac_windows_traded,
+            "max_pairs": self.max_pairs,
         }
 
 
@@ -74,13 +85,25 @@ def _pair_block_returns(
     q_beta: float,
     q_alpha: float,
     formation: int,
+    use_time_stop: bool = False,
+    time_stop_multiple: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """One trading-block PnL for a single screened pair (formation already known)."""
+    from .ou import fit_ou
+    from .rank import formation_residual
+
     yf, xf = y[:formation], x[:formation]
     yt, xt = y[formation:], x[formation:]
     z, beta, _ = _window_signal(yf, xf, yt, xt, hedge, q_beta, q_alpha)
+    max_hold = None
+    if use_time_stop:
+        try:
+            fit = fit_ou(formation_residual(yf, xf))
+            max_hold = fit.max_hold(time_stop_multiple)
+        except ValueError:
+            max_hold = None
     pos = mean_reversion_positions(
-        pd.Series(z), z_enter=z_enter, z_exit=z_exit
+        pd.Series(z), z_enter=z_enter, z_exit=z_exit, max_hold=max_hold
     ).to_numpy(dtype=float, copy=True)
     pos[-1] = 0.0
     g, c, rh = _block_pnl(yt, xt, pos, beta, rate, n_legs)
@@ -105,18 +128,28 @@ def universe_formation_backtest(
     q_alpha: float = Q_ALPHA,
     alpha: float = 0.05,
     maxlag: int | None = 1,
+    rank_by: str = "eg_p",
+    max_pairs: int | None = None,
+    use_time_stop: bool = False,
+    time_stop_multiple: float = 3.0,
 ) -> RescreenResult:
     """Roll formation/trading windows; screen on formation, trade discoveries.
 
     ``rule`` must be one of ``screening.RULES``. When a window yields zero
     discoveries the book stays flat (zero return, zero cost) for that block.
-    When there are several, each pair is traded independently and the block
-    return is the equal-weight average of their costed returns.
+    When there are several, ``rank_by`` / ``max_pairs`` select a subset (see
+    ``statarb.rank.select_top``); each kept pair is traded independently and
+    the block return is the equal-weight average of their costed returns.
+
+    ``use_time_stop`` fits an OU half-life on the formation residual and passes
+    ``ceil(time_stop_multiple * half_life)`` into ``mean_reversion_positions``.
     """
     if rule not in RULES:
         raise ValueError(f"rule must be one of {RULES}, got {rule!r}")
     if hedge not in ("ols", "kalman"):
         raise ValueError("hedge must be 'ols' or 'kalman'")
+    if rank_by not in RANK_KEYS:
+        raise ValueError(f"rank_by must be one of {RANK_KEYS}, got {rank_by!r}")
     clean = prices.astype(float).dropna().sort_index()
     if formation < 30 or trading < 2:
         raise ValueError("formation must be >= 30 bars and trading >= 2 bars")
@@ -137,16 +170,24 @@ def universe_formation_backtest(
         t_sl = slice(start + formation, start + formation + trading)
         form_px = clean.iloc[f_sl]
         screen = screen_pairs(form_px, alpha=alpha, maxlag=maxlag)
-        selected = screen.loc[screen[rule]].reset_index(drop=True)
-        n_disc = int(len(selected))
+        n_disc = int(screen[rule].sum())
+        selected = select_top(
+            screen,
+            rule=rule,
+            rank_by=rank_by,
+            max_pairs=max_pairs,
+            prices=form_px,
+        )
+        n_sel = int(len(selected))
         block_idx = clean.index[t_sl]
-        if n_disc == 0:
+        if n_sel == 0:
             rets.loc[block_idx] = 0.0
             win_rows.append(
                 {
                     "trade_start": block_idx[0],
                     "trade_end": block_idx[-1],
-                    "discoveries": 0,
+                    "discoveries": n_disc,
+                    "selected": 0,
                     "net_return": 0.0,
                     "trades": 0,
                 }
@@ -175,6 +216,8 @@ def universe_formation_backtest(
                     q_beta=q_beta,
                     q_alpha=q_alpha,
                     formation=formation,
+                    use_time_stop=use_time_stop,
+                    time_stop_multiple=time_stop_multiple,
                 )
                 pair_rets.append(r)
                 block_cost += float(c.sum())
@@ -182,16 +225,17 @@ def universe_formation_backtest(
                 block_trades += n_tr
             avg = np.mean(np.vstack(pair_rets), axis=0)
             rets.loc[block_idx] = avg
-            # Costs are averages across equal-weighted pairs so they stay on the
-            # same scale as the averaged returns.
-            cost_total += block_cost / n_disc
-            rehedge_total += block_rh / n_disc
+            # Costs are averages across equal-weighted *selected* pairs so they
+            # stay on the same scale as the averaged returns.
+            cost_total += block_cost / n_sel
+            rehedge_total += block_rh / n_sel
             trades += block_trades
             win_rows.append(
                 {
                     "trade_start": block_idx[0],
                     "trade_end": block_idx[-1],
                     "discoveries": n_disc,
+                    "selected": n_sel,
                     "net_return": float(np.prod(1.0 + avg) - 1.0),
                     "trades": block_trades,
                 }
@@ -212,7 +256,10 @@ def universe_formation_backtest(
         cost_paid=cost_total,
         rehedge_cost=rehedge_total,
         mean_discoveries=float(windows["discoveries"].mean()) if n_windows else 0.0,
-        frac_windows_traded=float((windows["discoveries"] > 0).mean()) if n_windows else 0.0,
+        mean_selected=float(windows["selected"].mean()) if n_windows else 0.0,
+        frac_windows_traded=float((windows["selected"] > 0).mean()) if n_windows else 0.0,
+        rank_by=rank_by,
+        max_pairs=float(max_pairs) if max_pairs is not None else float("inf"),
         returns=traded,
         windows=windows,
     )

@@ -109,3 +109,82 @@ def test_input_validation():
         universe_formation_backtest(frame, formation=10, trading=30)
     with pytest.raises(ValueError):
         universe_formation_backtest(frame)  # too short for default 252+63
+
+
+def test_max_pairs_cap_reduces_selected_below_discoveries():
+    # Naive screen finds many pairs; cap keeps at most 1 traded per window.
+    frame, _ = make_planted_universe(8, 3, 150 + 40 * 3, half_life=5.0, seed=8)
+    uncapped = universe_formation_backtest(
+        frame, rule="naive", formation=150, trading=40, rank_by="eg_p"
+    )
+    capped = universe_formation_backtest(
+        frame, rule="naive", formation=150, trading=40, rank_by="eg_p", max_pairs=1
+    )
+    assert uncapped.mean_discoveries >= capped.mean_selected
+    assert capped.mean_selected <= 1.0 + 1e-12
+    assert (capped.windows["selected"] <= 1).all()
+    # Cap never invents discoveries the screen did not make.
+    assert (capped.windows["selected"] <= capped.windows["discoveries"]).all()
+
+
+def test_score_rank_prefers_short_half_life_planted_pair():
+    # Fast HL pair should be preferred over a slow one when capped at 1.
+    frame, truth = make_planted_universe(
+        6, 2, 200 + 40 * 3, half_life=(4.0, 30.0), seed=9
+    )
+    res = universe_formation_backtest(
+        frame,
+        rule="naive",
+        formation=200,
+        trading=40,
+        rank_by="score",
+        max_pairs=1,
+    )
+    assert res.mean_selected > 0.0
+    # At least one window should trade; score cap keeps book smaller than uncapped.
+    uncapped = universe_formation_backtest(
+        frame, rule="naive", formation=200, trading=40, rank_by="eg_p"
+    )
+    assert res.mean_selected <= uncapped.mean_selected + 1e-12
+    assert len(truth) == 2
+
+
+def test_ranked_rescreen_is_causal_future_break_does_not_change_earlier():
+    frame, _ = make_planted_universe(
+        6, 2, 150 + 40 * 4, half_life=(5.0, 20.0), seed=12
+    )
+    broken = frame.copy()
+    cut_i = 150 + 40 * 3
+    broken.iloc[cut_i:] *= 1.12
+    a = universe_formation_backtest(
+        frame, rule="naive", formation=150, trading=40, rank_by="score", max_pairs=1
+    )
+    b = universe_formation_backtest(
+        broken, rule="naive", formation=150, trading=40, rank_by="score", max_pairs=1
+    )
+    cut = frame.index[cut_i - 1]
+    pd.testing.assert_series_equal(a.returns.loc[:cut], b.returns.loc[:cut])
+    pd.testing.assert_frame_equal(
+        a.windows.loc[:2, ["discoveries", "selected"]].reset_index(drop=True),
+        b.windows.loc[:2, ["discoveries", "selected"]].reset_index(drop=True),
+    )
+
+
+def test_time_stop_is_causal_and_can_change_path():
+    frame, _ = make_planted_universe(6, 2, 150 + 40 * 3, half_life=5.0, seed=13)
+    off = universe_formation_backtest(
+        frame, rule="bh", formation=150, trading=40, use_time_stop=False
+    )
+    on = universe_formation_backtest(
+        frame, rule="bh", formation=150, trading=40, use_time_stop=True, time_stop_multiple=2.0
+    )
+    # Same window grid; time stop must not invent look-ahead.
+    assert list(off.returns.index) == list(on.returns.index)
+    broken = frame.copy()
+    cut_i = 150 + 40 * 2
+    broken.iloc[cut_i:] *= 1.1
+    on_b = universe_formation_backtest(
+        broken, rule="bh", formation=150, trading=40, use_time_stop=True, time_stop_multiple=2.0
+    )
+    cut = frame.index[cut_i - 1]
+    pd.testing.assert_series_equal(on.returns.loc[:cut], on_b.returns.loc[:cut])

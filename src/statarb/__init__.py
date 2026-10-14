@@ -3,8 +3,9 @@
 Trading signals use Engle-Granger (OLS hedge ratio + residual) or a Kalman
 hedge. Johansen is a diagnostic and a confirmation filter in the pair screen
 (``statarb.screening``); this package does not turn Johansen eigenvectors into
-positions. Per-window universe re-screening and nested Kalman ``q_beta`` tuning
-live in ``statarb.rescreen`` and ``statarb.nested``.
+positions. Per-window universe re-screening, discovery ranking/capping, and
+nested Kalman ``q_beta`` tuning live in ``statarb.rescreen``, ``statarb.rank``
+and ``statarb.nested``.
 """
 
 from .backtest import backtest_spread, expanding_walk_forward, walk_forward
@@ -12,7 +13,8 @@ from .cointegration import EngleGrangerResult, JohansenResult, engle_granger, jo
 from .data import download_pair, load_csv
 from .kalman import kalman_hedge, static_hedge_path
 from .screening import benjamini_hochberg, screen_pairs, screen_summary
-from .rescreen import compare_rules, universe_formation_backtest
+from .rescreen import compare_rank_policies, compare_rules, universe_formation_backtest
+from .rank import annotate_half_lives, score_discoveries, select_top
 from .nested import compare_fixed_vs_nested, nested_kalman_backtest, tune_q_beta
 from .params import (
     ANNUALIZATION,
@@ -45,6 +47,10 @@ __all__ = [
     "benjamini_hochberg",
     "compare_fixed_vs_nested",
     "compare_rules",
+    "select_top",
+    "score_discoveries",
+    "compare_rank_policies",
+    "annotate_half_lives",
     "compute_spread",
     "download_pair",
     "engle_granger",

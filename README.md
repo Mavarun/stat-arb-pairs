@@ -222,6 +222,103 @@ it is a less-bad hedge under misspecification.
   drift or a different signal rule was not tried.
 - Costs remain bps on gross notional; no borrow, no impact, closes only.
 
+
+## Oct 14 slice: ranked/capped re-screen, OU time-stop, slower drift
+
+Oct 9 equal-weighted every discovery and only tried a fast beta drift
+(1.0 → 2.5). This slice ranks and caps discoveries, wires the existing OU
+time-stop into formation/re-screen books, and re-runs nested vs fixed Kalman
+across slow / medium / fast drifts. Reproduce with
+`python scripts/run_oct14_experiments.py`. Still synthetic, seeded and offline.
+
+### Method
+
+| Module | What it does |
+| --- | --- |
+| `rank` | Annotate each screened pair with the OU half-life of its formation EG residual; score `(-log eg_p) / half_life` inside a tradable band [2, 40] bars; `select_top` ranks by `eg_p` / `half_life` / `score` and optionally caps at `max_pairs` |
+| `rescreen` | `universe_formation_backtest(..., rank_by=, max_pairs=, use_time_stop=)` equal-weights only the selected pairs; reports `mean_selected` vs `mean_discoveries` |
+| `formation` | Optional `use_time_stop` fits OU on the formation residual and passes `ceil(k * HL)` into `mean_reversion_positions` |
+| `synth` | `make_planted_universe` accepts a per-pair half-life sequence so ranking tests can plant a fast/slow mix |
+
+Causality: half-life, score, cap and the time-stop fit use formation bars only.
+A break planted in a later trading block does not change earlier returns or
+earlier selection counts.
+
+### Results
+
+Ranked / capped re-screen on a planted fast/slow mix (half-lives 4 / 8 / 28,
+10 noise + 3 pairs, 8 blocks, 10 seeds), net of 10 bps/leg. Under **BH**,
+median discoveries are already ~0.6 so a top-1 cap is a no-op (all policies
+median Sharpe ≈ 0.23, return ≈ 0.4%). Under **naive EG** the screen over-discovers
+and the cap matters:
+
+| Policy (naive EG) | Median discoveries | Median selected | Median Sharpe | Median total return | Median cost paid |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Equal-weight all | 4.19 | 4.19 | -0.09 | -0.7% | 0.042 |
+| `eg_p` top-1 | 4.19 | 1.00 | 0.99 | +4.0% | 0.054 |
+| `score` top-1 | 4.19 | 1.00 | 0.99 | +3.7% | 0.054 |
+| `half_life` top-1 | 4.19 | 1.00 | 0.89 | +3.3% | 0.050 |
+| `eg_p` top-2 | 4.19 | 2.00 | 0.01 | +0.1% | 0.045 |
+
+Reading: equal-weighting every naive discovery trades the false pairs and
+pays for them (negative median Sharpe). Keeping only the strongest EG p (or
+the composite score) flips the book to a positive median Sharpe on this
+synthetic mix; top-2 already dilutes most of the gain. Ranking is **not** a
+substitute for FDR control — on pure noise, BH (with or without a score cap)
+stays flat (median selected 0, cost 0), which is the right answer.
+
+OU time-stop on the BH re-screen book (planted HL = 5, `k = 3`, 10 seeds):
+
+| Time-stop | Median Sharpe | Median total return | Median trades | Median cost paid |
+| --- | ---: | ---: | ---: | ---: |
+| Off | 0.51 | +2.2% | 10.5 | 0.028 |
+| On (3 × HL) | 0.31 | +0.9% | 12.5 | 0.035 |
+
+Reading: the time-stop **hurts** here. Mean-reversion that would have paid
+gets cut early, turnover rises, and net Sharpe falls. It is a risk control,
+not an edge, on this generator.
+
+Nested vs fixed Kalman `q_beta` across drift speeds (12 seeds, 8 blocks,
+HL = 5), net of costs:
+
+| Scenario | Median Sharpe, fixed `1e-6` | Median Sharpe, nested | Nested wins | Median return, fixed / nested |
+| --- | ---: | ---: | ---: | ---: |
+| Constant beta | -0.14 | -0.02 | 6/12 | -0.2% / -0.0% |
+| Slow drift 1.0 → 1.3 | -0.10 | -0.38 | 1/12 | -0.5% / -1.2% |
+| Medium drift 1.0 → 1.5 | -0.97 | -0.85 | 7/12 | -4.8% / -4.9% |
+| Fast drift 1.0 → 2.5 | -1.59 | -1.07 | 11/12 | -13.7% / -8.4% |
+
+Reading: nested tuning still helps most when drift is fast (same qualitative
+story as Oct 9). On a *slow* drift it **overfits** the noisy inner Sharpe and
+loses to the fixed default (1/12 wins). Medium drift is a wash after costs;
+every drifting book still loses money. A 3 × HL time-stop on the single-pair
+OLS book under fast drift does not rescue it (median Sharpe -1.39 → -1.42).
+
+### What the tests check
+
+- Rank: formation residual recovers planted HL; scores outside the HL band are
+  `-inf`; `select_top` by `eg_p` / `score` orders and caps correctly.
+- Synth: per-pair half-life sequences plant a recoverable fast/slow mix.
+- Re-screen: `max_pairs` never exceeds discoveries; score-ranked causality
+  (future breaks do not change earlier returns or selection counts); time-stop
+  paths stay causal.
+- Formation: time-stop off matches the legacy path; time-stop on is causal
+  under a late break.
+
+### Weaknesses
+
+- Still synthetic only: no real-pair universe or bundled public tape.
+- Under BH the top-1 cap is usually a no-op; ranking shines when the screen is
+  permissive (naive), which is exactly when you should prefer BH instead.
+- Composite score uses a fixed HL band and `-log p`; it is not a nested
+  estimate of tradable Sharpe.
+- OU time-stop reduced net Sharpe on the planted BH book; no adaptive multiple
+  was tried.
+- Slow beta drift makes nested `q_beta` tuning worse than the default — the
+  inner score is too noisy for small misspecifications.
+- Costs remain bps on gross notional; no borrow, no impact, closes only.
+- `q_alpha` is still never tuned.
+
 ## Install
 
 ```bash
@@ -253,8 +350,8 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 ## Layout
 
 ```
-src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested
-scripts/         run_oct05_experiments.py, run_oct09_experiments.py
+src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank
+scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)
@@ -262,4 +359,4 @@ data/            make_sample.py + sample_ko_pep.csv (sample, not live)
 
 ## What is still out of scope
 
-Johansen-traded eigenvectors, ranking or capping re-screened discoveries, joint tuning of `q_alpha` with `q_beta`, execution at the open, borrow, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker.
+Johansen-traded eigenvectors, joint tuning of `q_alpha` with `q_beta`, execution at the open, borrow, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice.

@@ -123,7 +123,7 @@ def make_planted_universe(
     n_pairs: int = 4,
     n: int = 750,
     *,
-    half_life: float = 8.0,
+    half_life: float | list[float] | tuple[float, ...] = 8.0,
     sigma_spread: float = 1.0,
     seed: int = 0,
     start: str = "2015-01-01",
@@ -132,7 +132,17 @@ def make_planted_universe(
 
     Returns the price frame and the set of true pairs (unordered names).
     Planted pairs use independent x legs, so no cross-pair cointegration.
+
+    ``half_life`` may be a scalar (every planted pair shares it) or a sequence
+    of length ``n_pairs`` so ranking tests can plant a mix of fast and slow
+    mean-reverters in one universe.
     """
+    if np.isscalar(half_life):
+        half_lives = [float(half_life)] * int(n_pairs)
+    else:
+        half_lives = [float(h) for h in half_life]
+        if len(half_lives) != int(n_pairs):
+            raise ValueError("half_life sequence must have length n_pairs")
     rng = np.random.default_rng(seed)
     frame = make_random_walk_universe(n_noise, n, seed=int(rng.integers(1 << 31)), start=start)
     truth: set[frozenset[str]] = set()
@@ -142,7 +152,7 @@ def make_planted_universe(
             n,
             beta=beta,
             intercept=float(rng.uniform(-5, 5)),
-            half_life=half_life,
+            half_life=half_lives[k],
             sigma_spread=sigma_spread,
             seed=int(rng.integers(1 << 31)),
             start=start,

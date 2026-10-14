@@ -20,13 +20,18 @@ TRADING = 63
 N_BLOCKS = 8
 
 
-def ranked_vs_equal_weight() -> pd.DataFrame:
-    """Planted mix of fast/slow pairs: equal-weight BH vs capped score/eg_p."""
+def ranked_vs_equal_weight(rule: str = "bh") -> pd.DataFrame:
+    """Planted mix of fast/slow pairs: equal-weight vs capped score/eg_p/HL.
+
+    Under BH, median discoveries are already ~1 so a top-1 cap is mostly a
+    no-op. Under naive EG the screen over-discovers and the cap matters.
+    """
     policies = (
         ("eg_p", None, "equal_weight_all"),
         ("eg_p", 1, "eg_p_top1"),
         ("score", 1, "score_top1"),
         ("half_life", 1, "hl_top1"),
+        ("eg_p", 2, "eg_p_top2"),
     )
     rows = {label: [] for _, _, label in policies}
     for s in range(N_SEEDS_RANK):
@@ -40,7 +45,7 @@ def ranked_vs_equal_weight() -> pd.DataFrame:
         for rank_by, max_pairs, label in policies:
             res = universe_formation_backtest(
                 frame,
-                rule="bh",
+                rule=rule,
                 hedge="ols",
                 formation=FORMATION,
                 trading=TRADING,
@@ -53,6 +58,7 @@ def ranked_vs_equal_weight() -> pd.DataFrame:
         df = pd.DataFrame(rows[label])
         out.append(
             {
+                "rule": rule,
                 "policy": label,
                 "median_mean_discoveries": float(df["mean_discoveries"].median()),
                 "median_mean_selected": float(df["mean_selected"].median()),
@@ -225,7 +231,10 @@ def main() -> None:
     pd.set_option("display.width", 140)
     pd.set_option("display.max_columns", 20)
     print("=== Ranked / capped re-screen (planted fast/slow mix, BH) ===")
-    print(ranked_vs_equal_weight().to_string(index=False))
+    print(ranked_vs_equal_weight("bh").to_string(index=False))
+    print()
+    print("=== Ranked / capped re-screen (planted fast/slow mix, naive EG) ===")
+    print(ranked_vs_equal_weight("naive").to_string(index=False))
     print()
     print("=== Pure noise: BH all vs BH score top-1 ===")
     print(noise_cap_stays_flat().to_string(index=False))

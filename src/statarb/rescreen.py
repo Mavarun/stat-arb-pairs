@@ -273,3 +273,26 @@ def compare_rules(
     """Run the same walk-forward under several screening rules."""
     rows = {r: universe_formation_backtest(prices, rule=r, **kwargs).as_dict() for r in rules}
     return pd.DataFrame(rows).T
+
+
+def compare_rank_policies(
+    prices: pd.DataFrame,
+    *,
+    rule: str = "bh",
+    policies: tuple[tuple[str, int | None], ...] = (
+        ("eg_p", None),
+        ("eg_p", 1),
+        ("score", 1),
+        ("half_life", 1),
+    ),
+    **kwargs,
+) -> pd.DataFrame:
+    """Same walk-forward under several (rank_by, max_pairs) policies."""
+    rows = {}
+    for rank_by, max_pairs in policies:
+        key = f"{rank_by}_cap{max_pairs if max_pairs is not None else 'all'}"
+        res = universe_formation_backtest(
+            prices, rule=rule, rank_by=rank_by, max_pairs=max_pairs, **kwargs
+        )
+        rows[key] = res.as_dict()
+    return pd.DataFrame(rows).T

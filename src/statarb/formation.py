@@ -31,6 +31,15 @@ existing convention in ``backtest.apply_costs`` (each leg charged on gross
 notional per unit change). The second is the re-hedge of the x leg when beta
 moves while a position is held; it is zero for the static hedge. Cost is
 charged on the bar the trade is made.
+
+Optional stock-borrow fee (``borrow_bps``, annualised, default 0)::
+
+    borrow_{t+1} = borrow_bps / 1e4 / 252 * |pos_t| * short_t / gross_t
+    short_t = |beta_t| * |x_t|  if pos_t > 0 (long spread: short x)
+            = |y_t|             if pos_t < 0 (short spread: short y)
+
+accrued on every bar a position is held over, in the same gross-notional
+units as the return.
 """
 
 from __future__ import annotations
@@ -43,7 +52,7 @@ import statsmodels.api as sm
 
 from .backtest import _max_drawdown, _sharpe
 from .kalman import Q_ALPHA, Q_BETA, kalman_hedge
-from .params import N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
+from .params import ANNUALIZATION, BORROW_BPS, N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
 from .signals import mean_reversion_positions
 
 FORMATION = 252
@@ -65,6 +74,7 @@ class FormationResult:
     positions: pd.Series = field(repr=False)
     beta: pd.Series = field(repr=False)
     windows: pd.DataFrame = field(repr=False)
+    borrow_cost: float = 0.0
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -75,6 +85,7 @@ class FormationResult:
             "n_windows": float(self.n_windows),
             "cost_paid": self.cost_paid,
             "rehedge_cost": self.rehedge_cost,
+            "borrow_cost": self.borrow_cost,
         }
 
 
@@ -122,6 +133,26 @@ def _block_pnl(
     return gross_ret, trade_cost, rehedge
 
 
+def _borrow_cost(
+    y: np.ndarray, x: np.ndarray, pos: np.ndarray, beta: np.ndarray, borrow_bps: float
+) -> np.ndarray:
+    """Per-bar borrow fee for one trading block (bar i pays for the book held over (i-1, i]).
+
+    The short leg is x (scaled by |beta|) for a long spread and y for a short
+    spread; the fee is a fraction of lagged gross notional, like the return.
+    """
+    n = len(y)
+    out = np.zeros(n)
+    if borrow_bps == 0.0 or n < 2:
+        return out
+    daily = float(borrow_bps) / 1e4 / ANNUALIZATION
+    notional = np.abs(y) + np.abs(beta) * np.abs(x)
+    p = pos[:-1]
+    short = np.where(p > 0, np.abs(beta[:-1]) * np.abs(x[:-1]), np.where(p < 0, np.abs(y[:-1]), 0.0))
+    out[1:] = daily * np.abs(p) * short / notional[:-1]
+    return out
+
+
 def formation_trading_backtest(
     y: pd.Series,
     x: pd.Series,
@@ -138,6 +169,7 @@ def formation_trading_backtest(
     q_alpha: float = Q_ALPHA,
     use_time_stop: bool = False,
     time_stop_multiple: float = 3.0,
+    borrow_bps: float = BORROW_BPS,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
@@ -151,6 +183,8 @@ def formation_trading_backtest(
         raise ValueError("formation must be >= 30 bars and trading >= 2 bars")
     if len(both) < formation + trading:
         raise ValueError("Sample shorter than one formation + trading window.")
+    if borrow_bps < 0:
+        raise ValueError("borrow_bps must be >= 0")
     yv, xv = both["y"].to_numpy(), both["x"].to_numpy()
     rate = (float(spread_bps) + float(slippage_bps)) / 1e4
 
@@ -158,7 +192,7 @@ def formation_trading_backtest(
     rets = pd.Series(np.nan, index=both.index, name="ret")
     pos_s = pd.Series(np.nan, index=both.index, name="position")
     beta_s = pd.Series(np.nan, index=both.index, name="beta")
-    cost_total = rehedge_total = gross_total = 0.0
+    cost_total = rehedge_total = gross_total = borrow_total = 0.0
     trades = 0
     win_rows = []
     start = 0
@@ -183,7 +217,8 @@ def formation_trading_backtest(
         ).to_numpy(dtype=float, copy=True)
         pos[-1] = 0.0  # forced flat at block end
         g, c, rh = _block_pnl(yv[t_sl], xv[t_sl], pos, beta, rate, n_legs)
-        r = g - c - rh
+        bw = _borrow_cost(yv[t_sl], xv[t_sl], pos, beta, borrow_bps)
+        r = g - c - rh - bw
         idx = both.index[t_sl]
         rets.loc[idx] = r
         pos_s.loc[idx] = pos
@@ -191,8 +226,9 @@ def formation_trading_backtest(
         prev = np.concatenate([[0.0], pos[:-1]])
         n_tr = int(((prev == 0) & (pos != 0)).sum() + ((prev != 0) & (pos != 0) & (prev != pos)).sum())
         trades += n_tr
-        cost_total += float(c.sum() + rh.sum())
+        cost_total += float(c.sum() + rh.sum() + bw.sum())
         rehedge_total += float(rh.sum())
+        borrow_total += float(bw.sum())
         gross_total += float(g.sum())
         win_rows.append(
             {
@@ -221,6 +257,7 @@ def formation_trading_backtest(
         positions=pos_s.dropna(),
         beta=beta_s.dropna(),
         windows=pd.DataFrame(win_rows),
+        borrow_cost=borrow_total,
     )
 
 

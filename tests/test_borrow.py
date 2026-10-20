@@ -69,3 +69,18 @@ def test_rescreen_borrow_zero_matches_legacy_and_is_monotone():
     assert np.isclose(dear.cost_paid - zero.cost_paid, dear.borrow_cost)
     with pytest.raises(ValueError):
         universe_formation_backtest(frame, borrow_bps=-5.0, **kw)
+
+
+def test_nested_charges_borrow_in_inner_score_and_outer_book():
+    from statarb.nested import compare_fixed_vs_nested, nested_kalman_backtest
+
+    p = make_ou_pair(252 + 63 * 2, half_life=5, seed=31)
+    kw = dict(formation=252, trading=63, inner_formation=84, inner_trading=21)
+    legacy = nested_kalman_backtest(p.y, p.x, **kw)
+    zero = nested_kalman_backtest(p.y, p.x, borrow_bps=0.0, **kw)
+    pd.testing.assert_series_equal(legacy.returns, zero.returns)
+    dear = nested_kalman_backtest(p.y, p.x, borrow_bps=400.0, **kw)
+    assert dear.borrow_cost > 0.0 == zero.borrow_cost
+    t = compare_fixed_vs_nested(p.y, p.x, borrow_bps=400.0, **kw)
+    assert t.loc["fixed_default_q", "borrow_cost"] > 0.0
+    assert t.loc["nested_tuned_q", "borrow_cost"] > 0.0

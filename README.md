@@ -319,6 +319,93 @@ OLS book under fast drift does not rescue it (median Sharpe -1.39 → -1.42).
 - Costs remain bps on gross notional; no borrow, no impact, closes only.
 - `q_alpha` is still never tuned.
 
+## Oct 20 slice: regularised nested tuning, joint q_alpha, borrow fee, formation-chosen time-stop
+
+Oct 14 left four open items: nested `q_beta` tuning overfits on slow drift, `q_alpha` was never
+tuned, costs had no borrow, and the fixed 3 × HL time-stop hurt with no adaptive multiple tried.
+This slice adds one tool for each and measures it on the same generators and seeds. Reproduce with
+`python scripts/run_oct20_experiments.py`. Still synthetic, seeded and offline. Every book is
+out-of-sample (outer 252/63 walk-forward, every tune inside the formation window) and net of
+10 bps per leg plus the Kalman re-hedge charge.
+
+### Method
+
+| Piece | What it does |
+| --- | --- |
+| `nested.tune_q` | Scores each candidate by the median of its inner-window net Sharpes, then selects with `best` (legacy, chosen q bit-identical to Oct 14), `one_se` (closest-to-default candidate within one standard error of the best median; SE of a median ≈ 1.2533·sd/√n) or `sign` (leave the default only if a candidate beats it in paired inner windows with one-sided sign-test p < 0.10 and a positive median gain). Optional joint `(q_beta, q_alpha)` grid |
+| `nested_kalman_backtest(selection=, q_alpha_grid=)` | Uses the rule per outer window and records the chosen `q_alpha` and the fraction of windows that kept the default `q_beta` |
+| `borrow_bps` (formation, re-screen, nested) | Short-leg stock-borrow fee, annualised, accrued per held bar on the short leg's notional (`|β|x` long spread, `y` short spread) as a fraction of lagged gross notional. Default 0 keeps every earlier table |
+| `choose_time_stop_multiple` / `time_stop_multiple="auto"` | Per window, replays the formation residual's own z rule with k ∈ {2, 3, 5, none} net of costs and keeps the best net Sharpe (ties to the larger k); formation bars only |
+
+### Results
+
+Nested selection rules across drift speeds (12 seeds, same seeds as Oct 14, HL = 5, 8 blocks),
+median Sharpe net of costs, wins vs the fixed default `q_beta = 1e-6`:
+
+| Scenario | Fixed `1e-6` | Nested `best` (Oct 14 rule) | Nested `one_se` | Nested `sign` | Windows on default q (best / one_se / sign) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Constant beta | -0.14 | **-0.02** (6/12) | -0.14 (2/12) | -0.12 (2/12) | 81% / 100% / 100% |
+| Slow drift 1.0 → 1.3 | **-0.10** | -0.38 (1/12) | -0.20 (2/12) | -0.26 (1/12) | 63% / 94% / 100% |
+| Medium drift 1.0 → 1.5 | -0.97 | -0.85 (7/12) | **-0.77** (5/12) | -0.87 (4/12) | 50% / 81% / 88% |
+| Fast drift 1.0 → 2.5 | -1.59 | **-1.07** (11/12) | -1.17 (10/12) | -1.12 (10/12) | 25% / 44% / 56% |
+
+Reading: regularising the inner choice does what it is built for, and no more. On slow drift
+`one_se` halves the overfit damage (-0.38 → -0.20) and is best on medium drift, but it still loses
+to simply not tuning on slow drift (-0.20 vs -0.10). On constant beta it gives back the small gain
+the unregularised search found, and on fast drift it gives back about 0.1 of Sharpe. The sign test
+sits between the two. No rule wins every regime, and **every drifting book still loses money after
+costs**. Tuning `q_alpha` jointly on {1e-6, 1e-5, 1e-4, 1e-3} changes almost nothing: the one-SE
+book is identical in every regime, and `best` gets slightly worse on medium drift (-0.85 → -0.89).
+`q_alpha` is not where the drift loss comes from.
+
+Borrow-fee sensitivity (10 seeds; BH re-screen of 3 planted + 10 noise assets, and one known
+pair with static OLS, HL = 5):
+
+| Borrow (bps / yr) | BH re-screen median Sharpe | return | borrow paid | Single pair median Sharpe | return |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.29 | +0.65% | 0.0000 | 0.74 | +1.57% |
+| 25 | 0.27 | +0.62% | 0.0004 | 0.72 | +1.52% |
+| 100 | 0.24 | +0.52% | 0.0016 | 0.66 | +1.39% |
+| 300 | 0.16 | +0.32% | 0.0048 | 0.49 | +1.02% |
+
+Reading: easy-to-borrow rates (25 bps) cost little next to the 10 bps/leg trade costs (0.027 paid
+on the BH book), but a hard-to-borrow 300 bps cuts the BH book's median Sharpe by about 45%. The
+fee scales with time in the trade, so slower spreads pay more of it.
+
+OU time-stop, single pair, static OLS (12 seeds):
+
+| Scenario | Off | Fixed 3 × HL | Auto (formation-chosen k) | Auto chose "no stop" |
+| --- | ---: | ---: | ---: | ---: |
+| Constant beta | 0.43 | 0.02 | 0.43 (beats off on 0/12 seeds) | 95% of windows |
+| Fast drift 1.0 → 2.5 | -1.39 | -1.42 | -1.39 (identical to off) | 100% of windows |
+
+Reading: on these generators the formation replay almost always picks "no stop", so `auto`
+avoids the fixed stop's damage (0.43 → 0.02 on constant beta) but adds nothing over leaving the
+stop off. It is a guard against a bad fixed multiple, not an edge.
+
+### What the tests check
+
+- Borrow: hand-computed 4-bar fee with the short leg following the sign; zero borrow equals the
+  legacy book in formation, re-screen and nested; monotone in the rate; positions and trade counts
+  unchanged; fee only on held bars; negative rates rejected.
+- Selection: sign-test p-values; `best` tie-break to the default; `one_se` keeps the default inside
+  the noise band and leaves it for a large clean edge; `sign` needs consistent paired wins and the
+  default in the grid; joint grid covers every pair; new rules stay causal under a late break; the
+  default rule is the legacy book.
+- Auto time-stop: chosen k is a candidate, deterministic, recorded per window, causal under a late
+  break; fixed-k path unchanged.
+
+### Weaknesses
+
+- Still synthetic only: no real-pair universe or bundled public tape.
+- No inner selection rule wins across regimes; a regime-aware choice (e.g. drift detection on the
+  formation window) was not tried, and choosing among rules would need its own nested layer.
+- The one-SE band uses the best candidate's window spread only; the sign test ignores magnitude.
+- Borrow is a flat annual rate: no recall, no locate failure, no rate that rises with crowding.
+- The auto time-stop is scored in-sample on the formation window; on these generators it nearly
+  always picks no stop, so it was not tested where a stop should help (e.g. a planted break).
+- Costs otherwise remain bps on gross notional; no impact, closes only.
+
 ## Install
 
 ```bash
@@ -351,7 +438,7 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 
 ```
 src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank
-scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py
+scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)
@@ -359,4 +446,4 @@ data/            make_sample.py + sample_ko_pep.csv (sample, not live)
 
 ## What is still out of scope
 
-Johansen-traded eigenvectors, joint tuning of `q_alpha` with `q_beta`, execution at the open, borrow, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice.
+Johansen-traded eigenvectors, execution at the open, borrow recall / locate, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice; joint `q_alpha` tuning, a flat borrow fee and regularised nested selection landed on Oct 20.

@@ -50,3 +50,22 @@ def test_negative_borrow_rejected():
     p = make_ou_pair(252 + 63 * 2, seed=13)
     with pytest.raises(ValueError):
         formation_trading_backtest(p.y, p.x, borrow_bps=-1.0)
+
+
+def test_rescreen_borrow_zero_matches_legacy_and_is_monotone():
+    from statarb.rescreen import universe_formation_backtest
+    from statarb.synth import make_planted_universe
+
+    frame, _ = make_planted_universe(4, 2, 252 + 63 * 3, half_life=5.0, seed=21)
+    kw = dict(rule="naive", hedge="ols", formation=252, trading=63)
+    legacy = universe_formation_backtest(frame, **kw)
+    zero = universe_formation_backtest(frame, borrow_bps=0.0, **kw)
+    dear = universe_formation_backtest(frame, borrow_bps=300.0, **kw)
+    pd.testing.assert_series_equal(legacy.returns, zero.returns)
+    assert legacy.trades > 0
+    assert zero.borrow_cost == 0.0 < dear.borrow_cost
+    assert dear.total_return < zero.total_return
+    assert dear.trades == zero.trades
+    assert np.isclose(dear.cost_paid - zero.cost_paid, dear.borrow_cost)
+    with pytest.raises(ValueError):
+        universe_formation_backtest(frame, borrow_bps=-5.0, **kw)

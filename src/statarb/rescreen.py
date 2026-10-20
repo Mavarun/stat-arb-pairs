@@ -26,9 +26,9 @@ import numpy as np
 import pandas as pd
 
 from .backtest import _max_drawdown, _sharpe
-from .formation import FORMATION, TRADING, _block_pnl, _window_signal
+from .formation import FORMATION, TRADING, _block_pnl, _borrow_cost, _window_signal
 from .kalman import Q_ALPHA, Q_BETA
-from .params import N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
+from .params import BORROW_BPS, N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
 from .rank import RANK_KEYS, select_top
 from .screening import RULES, screen_pairs
 from .signals import mean_reversion_positions
@@ -56,6 +56,7 @@ class RescreenResult:
     max_pairs: float
     returns: pd.Series = field(repr=False)
     windows: pd.DataFrame = field(repr=False)
+    borrow_cost: float = 0.0
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -66,6 +67,7 @@ class RescreenResult:
             "n_windows": float(self.n_windows),
             "cost_paid": self.cost_paid,
             "rehedge_cost": self.rehedge_cost,
+            "borrow_cost": self.borrow_cost,
             "mean_discoveries": self.mean_discoveries,
             "mean_selected": self.mean_selected,
             "frac_windows_traded": self.frac_windows_traded,
@@ -87,8 +89,13 @@ def _pair_block_returns(
     formation: int,
     use_time_stop: bool = False,
     time_stop_multiple: float = 3.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-    """One trading-block PnL for a single screened pair (formation already known)."""
+    borrow_bps: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
+    """One trading-block PnL for a single screened pair (formation already known).
+
+    Returns ``(net, trade_cost, rehedge, n_trades, borrow)``; ``net`` already
+    has all three costs subtracted.
+    """
     from .ou import fit_ou
     from .rank import formation_residual
 
@@ -107,9 +114,10 @@ def _pair_block_returns(
     ).to_numpy(dtype=float, copy=True)
     pos[-1] = 0.0
     g, c, rh = _block_pnl(yt, xt, pos, beta, rate, n_legs)
+    bw = _borrow_cost(yt, xt, pos, beta, borrow_bps)
     prev = np.concatenate([[0.0], pos[:-1]])
     n_tr = int(((prev == 0) & (pos != 0)).sum() + ((prev != 0) & (pos != 0) & (prev != pos)).sum())
-    return g - c - rh, c, rh, n_tr
+    return g - c - rh - bw, c, rh, n_tr, bw
 
 
 def universe_formation_backtest(
@@ -132,6 +140,7 @@ def universe_formation_backtest(
     max_pairs: int | None = None,
     use_time_stop: bool = False,
     time_stop_multiple: float = 3.0,
+    borrow_bps: float = BORROW_BPS,
 ) -> RescreenResult:
     """Roll formation/trading windows; screen on formation, trade discoveries.
 
@@ -143,7 +152,12 @@ def universe_formation_backtest(
 
     ``use_time_stop`` fits an OU half-life on the formation residual and passes
     ``ceil(time_stop_multiple * half_life)`` into ``mean_reversion_positions``.
+
+    ``borrow_bps`` charges the short-leg stock-borrow fee of
+    ``formation._borrow_cost`` on every held bar (annualised, default 0).
     """
+    if borrow_bps < 0:
+        raise ValueError("borrow_bps must be >= 0")
     if rule not in RULES:
         raise ValueError(f"rule must be one of {RULES}, got {rule!r}")
     if hedge not in ("ols", "kalman"):
@@ -161,7 +175,7 @@ def universe_formation_backtest(
     rate = (float(spread_bps) + float(slippage_bps)) / 1e4
     n = len(clean)
     rets = pd.Series(np.nan, index=clean.index, name="ret")
-    cost_total = rehedge_total = 0.0
+    cost_total = rehedge_total = borrow_total = 0.0
     trades = 0
     win_rows: list[dict] = []
     start = 0
@@ -194,7 +208,7 @@ def universe_formation_backtest(
             )
         else:
             pair_rets = []
-            block_cost = block_rh = 0.0
+            block_cost = block_rh = block_bw = 0.0
             block_trades = 0
             for _, row in selected.iterrows():
                 a, b = row["a"], row["b"]
@@ -205,7 +219,7 @@ def universe_formation_backtest(
                     y_col, x_col = b, a
                 y = clean[y_col].to_numpy()[start : start + formation + trading]
                 x = clean[x_col].to_numpy()[start : start + formation + trading]
-                r, c, rh, n_tr = _pair_block_returns(
+                r, c, rh, n_tr, bw = _pair_block_returns(
                     y,
                     x,
                     hedge=hedge,
@@ -218,10 +232,12 @@ def universe_formation_backtest(
                     formation=formation,
                     use_time_stop=use_time_stop,
                     time_stop_multiple=time_stop_multiple,
+                    borrow_bps=borrow_bps,
                 )
                 pair_rets.append(r)
-                block_cost += float(c.sum())
+                block_cost += float(c.sum() + bw.sum())
                 block_rh += float(rh.sum())
+                block_bw += float(bw.sum())
                 block_trades += n_tr
             avg = np.mean(np.vstack(pair_rets), axis=0)
             rets.loc[block_idx] = avg
@@ -229,6 +245,7 @@ def universe_formation_backtest(
             # stay on the same scale as the averaged returns.
             cost_total += block_cost / n_sel
             rehedge_total += block_rh / n_sel
+            borrow_total += block_bw / n_sel
             trades += block_trades
             win_rows.append(
                 {
@@ -262,6 +279,7 @@ def universe_formation_backtest(
         max_pairs=float(max_pairs) if max_pairs is not None else float("inf"),
         returns=traded,
         windows=windows,
+        borrow_cost=borrow_total,
     )
 
 

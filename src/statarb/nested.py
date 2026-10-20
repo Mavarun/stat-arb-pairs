@@ -22,7 +22,7 @@ import pandas as pd
 from .backtest import _max_drawdown, _sharpe
 from .formation import FORMATION, TRADING, formation_trading_backtest
 from .kalman import Q_ALPHA, Q_BETA
-from .params import N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
+from .params import BORROW_BPS, N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
 
 # Log-spaced candidates around the package default (1e-6). Extremes are
 # deliberately bad: tiny q collapses to static OLS, huge q chases noise.
@@ -46,6 +46,7 @@ class NestedTuneResult:
     returns: pd.Series = field(repr=False)
     windows: pd.DataFrame = field(repr=False)
     chosen_q: list[float] = field(default_factory=list)
+    borrow_cost: float = 0.0
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -56,6 +57,7 @@ class NestedTuneResult:
             "n_windows": float(self.n_windows),
             "cost_paid": self.cost_paid,
             "rehedge_cost": self.rehedge_cost,
+            "borrow_cost": self.borrow_cost,
             "median_chosen_q": float(np.median(self.chosen_q)) if self.chosen_q else float("nan"),
         }
 
@@ -73,6 +75,7 @@ def tune_q_beta(
     spread_bps: float = SPREAD_BPS,
     slippage_bps: float = SLIPPAGE_BPS,
     n_legs: int = N_LEGS,
+    borrow_bps: float = BORROW_BPS,
 ) -> tuple[float, pd.DataFrame]:
     """Pick ``q_beta`` by median net Sharpe on an inner formation/trading roll.
 
@@ -102,6 +105,7 @@ def tune_q_beta(
             spread_bps=spread_bps,
             slippage_bps=slippage_bps,
             n_legs=n_legs,
+            borrow_bps=borrow_bps,
         )
         rows.append(
             {
@@ -149,8 +153,13 @@ def nested_kalman_backtest(
     spread_bps: float = SPREAD_BPS,
     slippage_bps: float = SLIPPAGE_BPS,
     n_legs: int = N_LEGS,
+    borrow_bps: float = BORROW_BPS,
 ) -> NestedTuneResult:
-    """Outer 252/63 walk-forward; tune ``q_beta`` inside each formation window."""
+    """Outer 252/63 walk-forward; tune ``q_beta`` inside each formation window.
+
+    ``borrow_bps`` (annualised short-leg fee) is charged both in the inner
+    scoring and in the outer book, so the tune optimises the same net PnL.
+    """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")],
         axis=1,
@@ -162,7 +171,7 @@ def nested_kalman_backtest(
 
     n = len(both)
     rets = pd.Series(np.nan, index=both.index, name="ret")
-    cost_total = rehedge_total = 0.0
+    cost_total = rehedge_total = borrow_total = 0.0
     trades = 0
     chosen: list[float] = []
     win_rows: list[dict] = []
@@ -184,6 +193,7 @@ def nested_kalman_backtest(
             spread_bps=spread_bps,
             slippage_bps=slippage_bps,
             n_legs=n_legs,
+            borrow_bps=borrow_bps,
         )
         chosen.append(q_star)
         # Re-run a single-block outer trade with the tuned q by calling the
@@ -202,10 +212,12 @@ def nested_kalman_backtest(
             spread_bps=spread_bps,
             slippage_bps=slippage_bps,
             n_legs=n_legs,
+            borrow_bps=borrow_bps,
         )
         rets.loc[block.returns.index] = block.returns
         cost_total += block.cost_paid
         rehedge_total += block.rehedge_cost
+        borrow_total += block.borrow_cost
         trades += block.trades
         win_rows.append(
             {
@@ -231,6 +243,7 @@ def nested_kalman_backtest(
         chosen_q=chosen,
         returns=traded,
         windows=pd.DataFrame(win_rows),
+        borrow_cost=borrow_total,
     )
 
 

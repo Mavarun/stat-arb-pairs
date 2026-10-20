@@ -5,7 +5,9 @@ hedge. Johansen is a diagnostic and a confirmation filter in the pair screen
 (``statarb.screening``); this package does not turn Johansen eigenvectors into
 positions. Per-window universe re-screening, discovery ranking/capping, and
 nested Kalman ``q_beta`` tuning live in ``statarb.rescreen``, ``statarb.rank``
-and ``statarb.nested``.
+and ``statarb.nested``. Regularised inner selection (``tune_q`` with
+``SELECTION_RULES``), a formation-chosen time-stop multiple and a short-leg
+borrow fee (``BORROW_BPS``) landed on Oct 20.
 """
 
 from .backtest import backtest_spread, expanding_walk_forward, walk_forward
@@ -15,9 +17,11 @@ from .kalman import kalman_hedge, static_hedge_path
 from .screening import benjamini_hochberg, screen_pairs, screen_summary
 from .rescreen import compare_rank_policies, compare_rules, universe_formation_backtest
 from .rank import annotate_half_lives, score_discoveries, select_top
-from .nested import compare_fixed_vs_nested, nested_kalman_backtest, tune_q_beta
+from .formation import choose_time_stop_multiple, formation_trading_backtest
+from .nested import SELECTION_RULES, compare_fixed_vs_nested, nested_kalman_backtest, tune_q, tune_q_beta
 from .params import (
     ANNUALIZATION,
+    BORROW_BPS,
     MIN_TRAIN_OBS,
     N_LEGS,
     SLIPPAGE_BPS,
@@ -33,6 +37,11 @@ __version__ = "0.1.0"
 
 __all__ = [
     "ANNUALIZATION",
+    "BORROW_BPS",
+    "SELECTION_RULES",
+    "choose_time_stop_multiple",
+    "formation_trading_backtest",
+    "tune_q",
     "MIN_TRAIN_OBS",
     "N_LEGS",
     "SLIPPAGE_BPS",

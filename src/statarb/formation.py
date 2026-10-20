@@ -153,6 +153,53 @@ def _borrow_cost(
     return out
 
 
+AUTO_TIME_STOP_MULTIPLES = (2.0, 3.0, 5.0, float("inf"))
+
+
+def choose_time_stop_multiple(
+    yf: np.ndarray,
+    xf: np.ndarray,
+    *,
+    multiples: tuple[float, ...] = AUTO_TIME_STOP_MULTIPLES,
+    z_enter: float = Z_ENTER,
+    z_exit: float = Z_EXIT,
+    rate: float = (SPREAD_BPS + SLIPPAGE_BPS) / 1e4,
+    n_legs: int = N_LEGS,
+) -> tuple[float, int | None]:
+    """Pick a time-stop multiple on the formation window only (static OLS book).
+
+    Replays the formation residual's own z-score rule with each candidate
+    ``k`` (``inf`` = no stop), net of the same trade costs, and keeps the
+    highest net Sharpe; ties go to the larger ``k`` (less intervention).
+    Returns ``(k, max_hold)``; ``max_hold`` is None for ``inf`` or an
+    undefined half-life. In-sample by construction: it never sees a trading bar.
+    """
+    from .ou import fit_ou
+    from .rank import formation_residual
+
+    try:
+        fit = fit_ou(formation_residual(yf, xf))
+    except ValueError:
+        return float("inf"), None
+    ols = sm.OLS(yf, sm.add_constant(xf, has_constant="add")).fit()
+    b = float(ols.params[1])
+    resid = yf - ols.fittedvalues
+    z = (resid - resid.mean()) / resid.std(ddof=1)
+    beta = np.full(len(yf), b)
+    best = None
+    for k in sorted(multiples, reverse=True):
+        hold = None if not np.isfinite(k) else fit.max_hold(k)
+        pos = mean_reversion_positions(pd.Series(z), z_enter=z_enter, z_exit=z_exit,
+                                       max_hold=hold).to_numpy(dtype=float, copy=True)
+        pos[-1] = 0.0
+        g, c, rh = _block_pnl(yf, xf, pos, beta, rate, n_legs)
+        sr = _sharpe(pd.Series(g - c - rh))
+        sr = sr if np.isfinite(sr) else -np.inf
+        if best is None or sr > best[0] + 1e-12:
+            best = (sr, k, hold)
+    return float(best[1]), best[2]
+
+
 def formation_trading_backtest(
     y: pd.Series,
     x: pd.Series,
@@ -168,13 +215,15 @@ def formation_trading_backtest(
     q_beta: float = Q_BETA,
     q_alpha: float = Q_ALPHA,
     use_time_stop: bool = False,
-    time_stop_multiple: float = 3.0,
+    time_stop_multiple: float | str = 3.0,
     borrow_bps: float = BORROW_BPS,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
     ``use_time_stop`` fits an OU on the *formation* residual and flattens any
     position held longer than ``ceil(time_stop_multiple * half_life)`` bars.
+    ``time_stop_multiple="auto"`` picks the multiple per window on formation
+    bars only (``choose_time_stop_multiple``); the choice is in ``windows``.
     """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
@@ -203,10 +252,16 @@ def formation_trading_backtest(
             yv[f_sl], xv[f_sl], yv[t_sl], xv[t_sl], hedge, q_beta, q_alpha
         )
         max_hold = None
-        if use_time_stop:
+        k_used = float("nan")
+        if use_time_stop and time_stop_multiple == "auto":
+            k_used, max_hold = choose_time_stop_multiple(
+                yv[f_sl], xv[f_sl], z_enter=z_enter, z_exit=z_exit, rate=rate, n_legs=n_legs
+            )
+        elif use_time_stop:
             from .ou import fit_ou
             from .rank import formation_residual
 
+            k_used = float(time_stop_multiple)
             try:
                 fit = fit_ou(formation_residual(yv[f_sl], xv[f_sl]))
                 max_hold = fit.max_hold(time_stop_multiple)
@@ -238,6 +293,7 @@ def formation_trading_backtest(
                 "beta_trade_end": float(beta[-1]),
                 "net_return": float(np.prod(1.0 + r) - 1.0),
                 "trades": n_tr,
+                "time_stop_multiple": k_used,
             }
         )
         start += trading

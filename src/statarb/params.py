@@ -17,6 +17,12 @@ SPREAD_BPS = 5.0
 SLIPPAGE_BPS = 5.0
 N_LEGS = 2
 
+# Stock-borrow fee on the short leg, annualised bps of the short leg's notional,
+# accrued per bar held (/ ANNUALIZATION). 0 keeps every earlier result
+# reproducible; easy-to-borrow US large caps are roughly 25-50 bps a year,
+# hard-to-borrow names can be hundreds. Not a locate or recall model.
+BORROW_BPS = 0.0
+
 # Walk-forward: estimate hedge ratio / z stats on this fraction, trade the remainder.
 TRAIN_FRAC = 0.70
 MIN_TRAIN_OBS = 252

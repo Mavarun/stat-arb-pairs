@@ -96,3 +96,53 @@ def test_regularised_rules_are_deterministic():
         a = tune_q_beta(form.y, form.x, formation=84, trading=21, selection=rule)[0]
         b = tune_q_beta(form.y.copy(), form.x.copy(), formation=84, trading=21, selection=rule)[0]
         assert a == b
+
+
+def _nested(y, x, **kw):
+    from statarb.nested import nested_kalman_backtest
+
+    return nested_kalman_backtest(y, x, formation=252, trading=63, inner_formation=84, inner_trading=21, **kw)
+
+
+def test_nested_regularised_rules_stay_causal():
+    import pandas as pd
+
+    p = make_ou_pair(252 + 63 * 3, half_life=5, seed=51)
+    y2 = p.y.copy()
+    y2.iloc[252 + 63 * 2 :] += 50.0
+    cut = p.y.index[252 + 63 * 2 - 1]
+    for rule in ("one_se", "sign"):
+        a, b = _nested(p.y, p.x, selection=rule), _nested(y2, p.x, selection=rule)
+        assert a.chosen_q[:2] == b.chosen_q[:2]
+        pd.testing.assert_series_equal(a.returns.loc[:cut], b.returns.loc[:cut])
+        assert a.selection == rule
+
+
+def test_nested_default_rule_is_the_legacy_best_rule():
+    import pandas as pd
+
+    p = make_ou_pair(252 + 63 * 2, half_life=5, seed=52)
+    a, b = _nested(p.y, p.x), _nested(p.y, p.x, selection="best")
+    assert a.chosen_q == b.chosen_q and a.selection == "best"
+    pd.testing.assert_series_equal(a.returns, b.returns)
+    assert a.chosen_q_alpha == [Q_ALPHA] * a.n_windows
+
+
+def test_nested_joint_q_alpha_is_recorded_and_traded():
+    p = make_ou_pair(252 + 63 * 2, half_life=5, seed=53)
+    grid = (Q_ALPHA / 100, Q_ALPHA)
+    res = _nested(p.y, p.x, selection="one_se", q_alpha_grid=grid)
+    assert len(res.chosen_q_alpha) == res.n_windows
+    assert set(res.chosen_q_alpha) <= set(grid)
+    assert list(res.windows["q_alpha"]) == res.chosen_q_alpha
+    d = res.as_dict()
+    assert 0.0 <= d["frac_windows_default_q"] <= 1.0
+
+
+def test_compare_fixed_vs_nested_forwards_the_rule_to_the_nested_book_only():
+    from statarb.nested import compare_fixed_vs_nested
+
+    p = make_ou_pair(252 + 63 * 2, half_life=5, seed=54)
+    t = compare_fixed_vs_nested(p.y, p.x, formation=252, trading=63, inner_formation=84,
+                                inner_trading=21, selection="sign")
+    assert set(t.index) == {"fixed_default_q", "nested_tuned_q"}

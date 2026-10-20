@@ -47,6 +47,8 @@ class NestedTuneResult:
     windows: pd.DataFrame = field(repr=False)
     chosen_q: list[float] = field(default_factory=list)
     borrow_cost: float = 0.0
+    chosen_q_alpha: list[float] = field(default_factory=list)
+    selection: str = "best"
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -59,6 +61,12 @@ class NestedTuneResult:
             "rehedge_cost": self.rehedge_cost,
             "borrow_cost": self.borrow_cost,
             "median_chosen_q": float(np.median(self.chosen_q)) if self.chosen_q else float("nan"),
+            "median_chosen_q_alpha": (
+                float(np.median(self.chosen_q_alpha)) if self.chosen_q_alpha else float("nan")
+            ),
+            "frac_windows_default_q": (
+                float(np.mean([q == Q_BETA for q in self.chosen_q])) if self.chosen_q else float("nan")
+            ),
         }
 
 
@@ -268,8 +276,14 @@ def nested_kalman_backtest(
     slippage_bps: float = SLIPPAGE_BPS,
     n_legs: int = N_LEGS,
     borrow_bps: float = BORROW_BPS,
+    selection: str = "best",
+    sign_alpha: float = SIGN_ALPHA,
+    q_alpha_grid: tuple[float, ...] | None = None,
 ) -> NestedTuneResult:
     """Outer 252/63 walk-forward; tune ``q_beta`` inside each formation window.
+
+    ``selection`` / ``sign_alpha`` pick the inner rule (``tune_q``);
+    ``q_alpha_grid`` also tunes ``q_alpha`` jointly (None keeps it fixed).
 
     ``borrow_bps`` (annualised short-leg fee) is charged both in the inner
     scoring and in the outer book, so the tune optimises the same net PnL.
@@ -288,6 +302,7 @@ def nested_kalman_backtest(
     cost_total = rehedge_total = borrow_total = 0.0
     trades = 0
     chosen: list[float] = []
+    chosen_a: list[float] = []
     win_rows: list[dict] = []
     start = 0
     while start + formation + trading <= n:
@@ -295,10 +310,11 @@ def nested_kalman_backtest(
         t_end = start + formation + trading
         y_form = both["y"].iloc[f_sl]
         x_form = both["x"].iloc[f_sl]
-        q_star, table = tune_q_beta(
+        q_star, qa_star, table = tune_q(
             y_form,
             x_form,
             q_grid=q_grid,
+            q_alpha_grid=q_alpha_grid,
             formation=inner_formation,
             trading=inner_trading,
             q_alpha=q_alpha,
@@ -308,8 +324,11 @@ def nested_kalman_backtest(
             slippage_bps=slippage_bps,
             n_legs=n_legs,
             borrow_bps=borrow_bps,
+            selection=selection,
+            sign_alpha=sign_alpha,
         )
         chosen.append(q_star)
+        chosen_a.append(qa_star)
         # Re-run a single-block outer trade with the tuned q by calling the
         # shared formation backtest on just this F+T slice (one window).
         slice_yx = both.iloc[start:t_end]
@@ -320,7 +339,7 @@ def nested_kalman_backtest(
             formation=formation,
             trading=trading,
             q_beta=q_star,
-            q_alpha=q_alpha,
+            q_alpha=qa_star,
             z_enter=z_enter,
             z_exit=z_exit,
             spread_bps=spread_bps,
@@ -338,6 +357,7 @@ def nested_kalman_backtest(
                 "trade_start": block.windows.iloc[0]["trade_start"],
                 "trade_end": block.windows.iloc[0]["trade_end"],
                 "q_beta": q_star,
+                "q_alpha": qa_star,
                 "inner_best_sharpe": float(table["median_sharpe"].max()) if len(table) else float("nan"),
                 "net_return": float(block.total_return),
                 "trades": block.trades,
@@ -358,6 +378,8 @@ def nested_kalman_backtest(
         returns=traded,
         windows=pd.DataFrame(win_rows),
         borrow_cost=borrow_total,
+        chosen_q_alpha=chosen_a,
+        selection=selection,
     )
 
 
@@ -369,7 +391,11 @@ def compare_fixed_vs_nested(
     **kwargs,
 ) -> pd.DataFrame:
     """Same outer walk-forward: fixed default q_beta vs nested-tuned q_beta."""
-    fixed_kw = {k: v for k, v in kwargs.items() if k not in ("inner_formation", "inner_trading", "q_grid")}
+    fixed_kw = {
+        k: v
+        for k, v in kwargs.items()
+        if k not in ("inner_formation", "inner_trading", "q_grid", "selection", "sign_alpha", "q_alpha_grid")
+    }
     fixed = formation_trading_backtest(y, x, hedge="kalman", q_beta=Q_BETA, **fixed_kw)
     nested = nested_kalman_backtest(y, x, q_grid=q_grid, **kwargs)
     return pd.DataFrame(

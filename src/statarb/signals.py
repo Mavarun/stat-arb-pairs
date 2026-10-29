@@ -13,6 +13,13 @@ flattened even if z has not reverted, and the book must see |z| drop back
 inside ``z_enter`` before re-entering the same side. The usual choice is a
 small multiple of the OU half-life (see ``statarb.ou.OUFit.max_hold``): a
 spread that has not reverted in ~3 half-lives is evidence the fit broke.
+
+Optional z stop-loss (``z_stop``): a held position is flattened on the bar its
+z-score moves *against* it beyond ``z_stop`` (a long spread at ``z < -z_stop``,
+a short at ``z > z_stop``), and the same side is blocked until |z| is back
+inside ``z_enter``, like the time stop. It reacts to the size of the adverse
+move instead of its duration, which is what a spread that has stopped being
+a pair (random walk, level shift) produces. ``z_stop`` must exceed ``z_enter``.
 """
 
 from __future__ import annotations
@@ -65,11 +72,13 @@ def mean_reversion_positions(
     z_enter: float = Z_ENTER,
     z_exit: float = Z_EXIT,
     max_hold: int | None = None,
+    z_stop: float | None = None,
 ) -> pd.Series:
     """Stateful mean-reversion book from a z-score series.
 
     NaN z-scores force a flat book (we do not carry a position through undefined z).
-    ``max_hold`` (bars, optional) is a time stop; see module docstring.
+    ``max_hold`` (bars, optional) is a time stop and ``z_stop`` an adverse-z
+    stop-loss; see module docstring. Both off reproduces the legacy book.
     """
     if max_hold is not None and int(max_hold) < 1:
         raise ValueError("max_hold must be >= 1 bar")
@@ -77,6 +86,8 @@ def mean_reversion_positions(
         raise ValueError("z_enter must be > z_exit")
     if z_enter <= 0 or z_exit < 0:
         raise ValueError("thresholds must be non-negative, with z_enter > 0")
+    if z_stop is not None and not float(z_stop) > z_enter:
+        raise ValueError("z_stop must be > z_enter")
 
     z_arr = pd.Series(z, dtype=float).to_numpy()
     pos = np.zeros(len(z_arr), dtype=float)
@@ -91,7 +102,8 @@ def mean_reversion_positions(
             continue
         if blocked != 0.0 and abs(zi) < z_enter:
             blocked = 0.0
-        if current != 0.0 and max_hold is not None and held >= int(max_hold):
+        adverse = z_stop is not None and current != 0.0 and -current * zi > float(z_stop)
+        if adverse or (current != 0.0 and max_hold is not None and held >= int(max_hold)):
             blocked = current
             current = 0.0
             held = 0

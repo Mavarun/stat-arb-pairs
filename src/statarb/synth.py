@@ -99,6 +99,65 @@ def make_ou_pair(
     )
 
 
+BREAK_KINDS = ("none", "random_walk", "level_shift")
+
+
+def make_broken_pair(
+    n: int = 1000,
+    *,
+    break_at: int,
+    kind: str = "random_walk",
+    shift_sigmas: float = 4.0,
+    half_life: float = 5.0,
+    sigma_spread: float = 1.0,
+    seed: int = 0,
+    **kwargs,
+) -> SyntheticPair:
+    """``make_ou_pair`` whose cointegration breaks at bar ``break_at``.
+
+    ``kind``:
+
+    * ``"random_walk"``: from ``break_at`` on, the spread is a driftless random
+      walk with the OU innovation scale (``rho = 1``): the pair has stopped
+      being a pair and nothing pulls the spread back.
+    * ``"level_shift"``: the OU keeps mean-reverting but around a new mean
+      ``shift_sigmas * sigma_spread`` away (a permanent re-rating of one leg).
+    * ``"none"``: the unbroken pair (bit-identical to ``make_ou_pair``).
+
+    The pre-break path, the x leg and the hedge ratio are identical across
+    kinds for the same seed, so books can be compared on common random numbers.
+    Post-break innovations come from a second generator seeded by ``seed``.
+    """
+    if kind not in BREAK_KINDS:
+        raise ValueError(f"kind must be one of {BREAK_KINDS}")
+    if not 1 <= int(break_at) < n:
+        raise ValueError("break_at must be in [1, n)")
+    base = make_ou_pair(n, half_life=half_life, sigma_spread=sigma_spread, seed=seed, **kwargs)
+    if kind == "none":
+        return base
+    s = base.spread.to_numpy(copy=True)
+    b = int(break_at)
+    if kind == "level_shift":
+        s[b:] += float(shift_sigmas) * float(sigma_spread)
+    else:
+        rng = np.random.default_rng([int(seed), 1])
+        sigma_eps = float(sigma_spread) * np.sqrt(1.0 - base.rho**2)
+        s[b:] = s[b - 1] + np.cumsum(rng.normal(0.0, sigma_eps, n - b))
+    y = base.y.to_numpy() - base.spread.to_numpy() + s
+    idx = base.y.index
+    return SyntheticPair(
+        y=pd.Series(y, index=idx, name="y"),
+        x=base.x,
+        beta=base.beta,
+        intercept=base.intercept,
+        half_life=base.half_life,
+        rho=base.rho,
+        sigma_spread=base.sigma_spread,
+        spread=pd.Series(s, index=idx, name="true_spread"),
+        beta_path=base.beta_path,
+    )
+
+
 def make_random_walk_universe(
     n_assets: int = 20,
     n: int = 750,

@@ -217,6 +217,7 @@ def formation_trading_backtest(
     use_time_stop: bool = False,
     time_stop_multiple: float | str = 3.0,
     borrow_bps: float = BORROW_BPS,
+    z_stop: float | None = None,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
@@ -224,6 +225,9 @@ def formation_trading_backtest(
     position held longer than ``ceil(time_stop_multiple * half_life)`` bars.
     ``time_stop_multiple="auto"`` picks the multiple per window on formation
     bars only (``choose_time_stop_multiple``); the choice is in ``windows``.
+    ``z_stop`` adds the adverse-z stop-loss of ``mean_reversion_positions``
+    on the trading-block z (formation statistics for OLS, innovations for
+    Kalman); ``windows["z_stops"]`` counts the stops fired per block.
     """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
@@ -268,8 +272,12 @@ def formation_trading_backtest(
             except ValueError:
                 max_hold = None
         pos = mean_reversion_positions(
-            pd.Series(z), z_enter=z_enter, z_exit=z_exit, max_hold=max_hold
+            pd.Series(z), z_enter=z_enter, z_exit=z_exit, max_hold=max_hold, z_stop=z_stop
         ).to_numpy(dtype=float, copy=True)
+        prev_raw = np.concatenate([[0.0], pos[:-1]])
+        n_zstop = 0 if z_stop is None else int(
+            ((prev_raw != 0) & (pos == 0) & (-prev_raw * np.asarray(z, dtype=float) > float(z_stop))).sum()
+        )
         pos[-1] = 0.0  # forced flat at block end
         g, c, rh = _block_pnl(yv[t_sl], xv[t_sl], pos, beta, rate, n_legs)
         bw = _borrow_cost(yv[t_sl], xv[t_sl], pos, beta, borrow_bps)
@@ -294,6 +302,7 @@ def formation_trading_backtest(
                 "net_return": float(np.prod(1.0 + r) - 1.0),
                 "trades": n_tr,
                 "time_stop_multiple": k_used,
+                "z_stops": n_zstop,
             }
         )
         start += trading

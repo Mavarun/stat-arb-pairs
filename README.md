@@ -406,6 +406,84 @@ stop off. It is a guard against a bad fixed multiple, not an edge.
   always picks no stop, so it was not tested where a stop should help (e.g. a planted break).
 - Costs otherwise remain bps on gross notional; no impact, closes only.
 
+## Oct 29 slice: stops on a pair that breaks
+
+Oct 20 left the auto time-stop untested "where a stop should help (e.g. a planted break)". This
+slice plants one and compares the time stops with a new adverse-z stop-loss. Reproduce with
+`python scripts/run_oct29_experiments.py` (synthetic, seeded, offline, ~8 s). Static OLS book,
+252/63 walk-forward, every traded bar out-of-sample, net of 10 bps per leg. The stop levels
+{3, 4} and 3 × HL were fixed before the first run, and nothing is tuned on these 12 new seeds
+(900–911).
+
+### Method
+
+| Piece | What it does |
+| --- | --- |
+| `synth.make_broken_pair` | `make_ou_pair` (HL = 5) whose cointegration breaks at a chosen bar: `random_walk` (from the break on, the spread is a driftless random walk with the OU innovation scale) or `level_shift` (the OU re-centres `shift_sigmas` σ away). The pre-break path, x leg and hedge are identical across kinds, so books are compared on common random numbers |
+| `mean_reversion_positions(z_stop=)` | Flattens a held position when z moves against it beyond `z_stop` (long at z < −z_stop, short at z > z_stop) and blocks that side until \|z\| < z_enter, like the time stop. Off by default; must exceed z_enter |
+| `formation_trading_backtest(z_stop=)` | Applies it on the trading-block z (formation mean/std) and records `z_stops` per window |
+
+Break at bar 756 of 1,260, so trading years 1–2 are clean and years 3–4 are post-break.
+
+### Results (12 seeds, medians; wins = seeds where the book's Sharpe beats `off`)
+
+| Scenario | Book | Sharpe | wins | post-break return | worst 63-bar window | max DD | stops / path |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| No break | off | **0.58** | – | +1.5% | −0.3% | −1.0% | – |
+| | time stop 3×HL | 0.25 | 0/12 | +0.5% | −0.5% | −1.5% | – |
+| | time stop auto | 0.58 | 0/12 | +1.5% | −0.3% | −1.0% | – |
+| | z stop 3 | 0.06 | 0/12 | +0.3% | −1.0% | −2.1% | 4.3 |
+| | z stop 4 | 0.51 | 0/12 | +1.5% | −0.3% | −1.2% | 0.4 |
+| Random-walk break | off | **−0.08** | – | −2.7% | −2.0% | −4.1% | – |
+| | time stop 3×HL | −0.32 | 1/12 | −1.7% | −1.9% | −4.0% | – |
+| | time stop auto | −0.08 | 0/12 | −2.7% | −2.0% | −4.1% | – |
+| | z stop 3 | −0.44 | 1/12 | −2.6% | −1.3% | −4.0% | 6.9 |
+| | z stop 4 | −0.08 | **7/12** | −1.7% | **−1.4%** | **−3.4%** | 2.7 |
+| | z stop 4 + 3×HL | −0.27 | 5/12 | −1.6% | −1.4% | −3.6% | 1.8 |
+| 4σ level shift | off | **0.45** | – | +1.3% | −0.7% | −1.8% | – |
+| | time stop 3×HL | 0.17 | 1/12 | +0.3% | −0.9% | −2.5% | – |
+| | time stop auto | 0.45 | 1/12 | +1.3% | −0.7% | −1.8% | – |
+| | z stop 3 | −0.16 | 0/12 | −0.7% | −1.2% | −2.7% | 5.3 |
+| | z stop 4 | 0.31 | 4/12 | +0.9% | −0.8% | −2.1% | 1.6 |
+
+Reading:
+
+- **When the pair really dies (random walk), z stop 4 is the only book that helps on most seeds.**
+  It wins on 7 of 12 seeds, cuts the median post-break loss from −2.7% to −1.7% and the worst
+  window from −2.0% to −1.4%, and the median Sharpe does not move (−0.08 → −0.08). It does not
+  make the broken pair profitable. Every book still loses money after the break.
+- **It costs Sharpe when nothing breaks.** With no break, z stop 4 loses on all 12 seeds
+  (0.58 → 0.51), and z stop 3 gives up almost the whole edge (0.06), because a healthy OU often
+  overshoots 3σ before it reverts. The stop is insurance, and this is its premium.
+- **A level shift is mostly absorbed by re-formation.** Each 252-bar formation window re-fits the
+  mean, so a year after the shift the book is trading the new level. `off` keeps a 0.45 Sharpe
+  and every stop does worse on median.
+- **The auto time-stop still adds nothing.** It replays the formation window, and before the break
+  that window is clean, so it picks "no stop" and matches `off` almost exactly in all three
+  scenarios. The fixed 3×HL stop hurts everywhere, as it did on Oct 20.
+
+### What the tests check
+
+- Generator: `none` equals `make_ou_pair`; the pre-break path and x leg are shared across kinds;
+  the level shift is exactly the planted amount; ADF rejects the pre-break spread on 10/10 seeds
+  and the post-break random walk on at most 3/10.
+- Stop rule: hand paths for long and short stops, same-side blocking and re-entry, favourable
+  moves never stop, composition with `max_hold`, legacy identity when off, validation.
+- Walk-forward: off is bit-identical for OLS and Kalman; causal under a late break (returns and
+  positions identical before it); stops concentrate after a planted shift.
+- The reading above at reduced scale (4 seeds): `test_oct29_claims.py`.
+
+### Weaknesses
+
+- Still synthetic. The break is planted in the same OU family the book assumes, and only two
+  shapes were tried.
+- The stop level is fixed, not chosen. A formation-window choice (like the auto time-stop) would
+  pick "no stop" for the same reason the auto time-stop does, because the formation window
+  before a break is clean.
+- The real remedy for a dead pair is to stop trading it. That means a post-break re-test
+  (re-screen with a stricter gate, or a CUSUM on the trading-block z), which was not tried here.
+- Static OLS only. The Kalman hedge adapts to drift and may hide or mimic a break.
+
 ## Install
 
 ```bash
@@ -438,7 +516,7 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 
 ```
 src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank
-scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py
+scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)
@@ -446,4 +524,4 @@ data/            make_sample.py + sample_ko_pep.csv (sample, not live)
 
 ## What is still out of scope
 
-Johansen-traded eigenvectors, execution at the open, borrow recall / locate, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice; joint `q_alpha` tuning, a flat borrow fee and regularised nested selection landed on Oct 20.
+Johansen-traded eigenvectors, execution at the open, borrow recall / locate, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice; joint `q_alpha` tuning, a flat borrow fee and regularised nested selection landed on Oct 20; planted cointegration breaks and an adverse-z stop-loss landed on Oct 29.

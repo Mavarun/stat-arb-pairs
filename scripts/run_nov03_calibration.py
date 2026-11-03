@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from statarb.breakwatch import cusum_path
+from statarb.cointegration import engle_granger
 from statarb.formation import FORMATION, TRADING, _window_signal
 from statarb.kalman import Q_ALPHA, Q_BETA
 from statarb.ou import fit_ou
@@ -55,10 +56,39 @@ def false_alarm_table(seeds=SEEDS, half_lives=HALF_LIVES, ks=KS, hs=H_GRID) -> p
     return pd.DataFrame(out)
 
 
+GATE_PS = (0.01, 0.05)
+GATE_HALF_LIVES = (3.0, 5.0, 10.0, 20.0, 40.0)
+
+
+def false_gating_table(seeds=SEEDS, half_lives=GATE_HALF_LIVES, gate_ps=GATE_PS) -> pd.DataFrame:
+    """Share of healthy 252-bar formation windows whose Engle-Granger p exceeds the gate.
+
+    A gated block is a block a healthy pair does not trade, so this is the premium of the
+    ``gate_p`` insurance: the slower the spread, the less power the test has in 252 bars.
+    One window per seed per non-overlapping block (the same windows the walk-forward uses).
+    """
+    out = []
+    for hl in half_lives:
+        pv = []
+        for seed in seeds:
+            p = make_ou_pair(N, half_life=hl, seed=seed)
+            for st in range(0, N - FORMATION - TRADING + 1, TRADING):
+                f = slice(st, st + FORMATION)
+                pv.append(engle_granger(p.y.iloc[f].reset_index(drop=True), p.x.iloc[f].reset_index(drop=True)).pvalue)
+        pv = np.asarray(pv)
+        row = {"half_life": hl, "windows": len(pv), "median_p": float(np.median(pv))}
+        for g in gate_ps:
+            row[f"gated@{g:g}"] = float((pv > g).mean())
+        out.append(row)
+    return pd.DataFrame(out)
+
+
 def main() -> None:
-    t = false_alarm_table()
     pd.set_option("display.width", 200)
-    print(t.round(3).to_string(index=False))
+    print("CUSUM false-alarm rate per healthy block")
+    print(false_alarm_table().round(3).to_string(index=False))
+    print("\nEngle-Granger gate: share of healthy formation windows gated")
+    print(false_gating_table().round(3).to_string(index=False))
 
 
 if __name__ == "__main__":

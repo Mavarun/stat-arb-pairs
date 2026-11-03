@@ -36,3 +36,11 @@ def test_slack_is_what_controls_false_alarms(table) -> None:
 
 def test_blocks_counted(table) -> None:
     assert (table["blocks"] == 15 * 16).all()
+
+
+def test_engle_granger_gate_starves_slow_pairs() -> None:
+    t = cal.false_gating_table(seeds=range(1000, 1010), half_lives=(3.0, 20.0), gate_ps=(0.01, 0.05)).set_index("half_life")
+    assert t.loc[3.0, "windows"] == 10 * 16
+    assert t.loc[3.0, "gated@0.01"] < 0.15  # a fast healthy pair is almost always traded
+    assert t.loc[20.0, "gated@0.01"] > 0.5  # a slow healthy pair mostly is not: 252 bars have little EG power
+    assert (t["gated@0.05"] <= t["gated@0.01"]).all()

@@ -222,6 +222,7 @@ def formation_trading_backtest(
     cusum_halt: bool = False,
     cusum_k: float = K_SLACK,
     cusum_h: float = H_ALARM,
+    gate_p: float | None = None,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
@@ -237,6 +238,11 @@ def formation_trading_backtest(
     (``windows["halt_bar"]`` is that bar's offset in the block, NaN if none).
     The OLS book scales z by the formation AR(1) long-run variance; the Kalman
     innovation z is close to white, so it uses rho = 0. Next block starts fresh.
+    ``gate_p`` re-tests the pair before each block: Engle-Granger on the
+    *formation* window (y on x, the ordering that is traded), and the
+    block stays flat when the p-value exceeds ``gate_p`` (``windows["eg_p"]``,
+    ``windows["gated"]``). It reads formation bars only, so it is causal, and it
+    can only act once the break is inside the formation window.
     """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
@@ -280,6 +286,13 @@ def formation_trading_backtest(
                 max_hold = fit.max_hold(time_stop_multiple)
             except ValueError:
                 max_hold = None
+        eg_p = float("nan")
+        gated = False
+        if gate_p is not None:
+            from .cointegration import engle_granger
+
+            eg_p = engle_granger(pd.Series(yv[f_sl]), pd.Series(xv[f_sl])).pvalue
+            gated = bool(eg_p > float(gate_p))
         pos = mean_reversion_positions(
             pd.Series(z), z_enter=z_enter, z_exit=z_exit, max_hold=max_hold, z_stop=z_stop
         ).to_numpy(dtype=float, copy=True)
@@ -287,8 +300,11 @@ def formation_trading_backtest(
         n_zstop = 0 if z_stop is None else int(
             ((prev_raw != 0) & (pos == 0) & (-prev_raw * np.asarray(z, dtype=float) > float(z_stop))).sum()
         )
+        if gated:
+            pos[:] = 0.0
+            n_zstop = 0
         halt_bar = float("nan")
-        if cusum_halt:
+        if cusum_halt and not gated:
             rho = 0.0
             if hedge == "ols":
                 from .ou import fit_ou
@@ -328,6 +344,8 @@ def formation_trading_backtest(
                 "time_stop_multiple": k_used,
                 "z_stops": n_zstop,
                 "halt_bar": halt_bar,
+                "eg_p": eg_p,
+                "gated": gated,
             }
         )
         start += trading

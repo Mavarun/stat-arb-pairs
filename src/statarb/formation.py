@@ -53,6 +53,7 @@ import statsmodels.api as sm
 from .backtest import _max_drawdown, _sharpe
 from .kalman import Q_ALPHA, Q_BETA, kalman_hedge
 from .params import ANNUALIZATION, BORROW_BPS, N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
+from .breakwatch import H_ALARM, K_SLACK, cusum_alarm
 from .signals import mean_reversion_positions
 
 FORMATION = 252
@@ -218,6 +219,9 @@ def formation_trading_backtest(
     time_stop_multiple: float | str = 3.0,
     borrow_bps: float = BORROW_BPS,
     z_stop: float | None = None,
+    cusum_halt: bool = False,
+    cusum_k: float = K_SLACK,
+    cusum_h: float = H_ALARM,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
@@ -228,6 +232,11 @@ def formation_trading_backtest(
     ``z_stop`` adds the adverse-z stop-loss of ``mean_reversion_positions``
     on the trading-block z (formation statistics for OLS, innovations for
     Kalman); ``windows["z_stops"]`` counts the stops fired per block.
+    ``cusum_halt`` runs the causal CUSUM of ``statarb.breakwatch`` on the same
+    z and keeps the book flat from the first alarm bar to the end of the block
+    (``windows["halt_bar"]`` is that bar's offset in the block, NaN if none).
+    The OLS book scales z by the formation AR(1) long-run variance; the Kalman
+    innovation z is close to white, so it uses rho = 0. Next block starts fresh.
     """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
@@ -278,6 +287,21 @@ def formation_trading_backtest(
         n_zstop = 0 if z_stop is None else int(
             ((prev_raw != 0) & (pos == 0) & (-prev_raw * np.asarray(z, dtype=float) > float(z_stop))).sum()
         )
+        halt_bar = float("nan")
+        if cusum_halt:
+            rho = 0.0
+            if hedge == "ols":
+                from .ou import fit_ou
+                from .rank import formation_residual
+
+                try:
+                    rho = fit_ou(formation_residual(yv[f_sl], xv[f_sl])).b
+                except ValueError:
+                    rho = 0.0
+            alarm = cusum_alarm(np.asarray(z, dtype=float), rho=rho, k=cusum_k, h=cusum_h)
+            if alarm is not None:
+                halt_bar = float(alarm)
+                pos[alarm:] = 0.0
         pos[-1] = 0.0  # forced flat at block end
         g, c, rh = _block_pnl(yv[t_sl], xv[t_sl], pos, beta, rate, n_legs)
         bw = _borrow_cost(yv[t_sl], xv[t_sl], pos, beta, borrow_bps)
@@ -303,6 +327,7 @@ def formation_trading_backtest(
                 "trades": n_tr,
                 "time_stop_multiple": k_used,
                 "z_stops": n_zstop,
+                "halt_bar": halt_bar,
             }
         )
         start += trading

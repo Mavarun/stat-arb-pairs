@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import numpy as np
 
-K_SLACK = 0.25
+K_SLACK = 0.5
 H_ALARM = 5.0
 RHO_CLIP = (-0.5, 0.98)
 

@@ -484,6 +484,111 @@ Reading:
   (re-screen with a stricter gate, or a CUSUM on the trading-block z), which was not tried here.
 - Static OLS only. The Kalman hedge adapts to drift and may hide or mimic a break.
 
+## Nov 3 slice: re-testing a pair after it breaks
+
+Oct 29 ended with "the real remedy for a dead pair is to stop trading it", untried. This slice tries two
+re-tests that read only past bars: a **CUSUM halt** inside the trading block and an **Engle-Granger gate**
+on the formation window before it. Reproduce with `python scripts/run_nov03_experiments.py` (~50 s) and
+`python scripts/run_nov03_calibration.py` (~2 min); synthetic, seeded, offline. Static OLS book, 252/63
+walk-forward, every traded bar out-of-sample, net of 10 bps per leg. CUSUM `k = 0.5, h = 5`, gate levels
+{0.01, 0.05}, z stop 4 and the 20 seeds (940-959) were fixed before the first run. `k`, `h` were chosen on
+the **no-break** false-alarm rate (calibration seeds 1000-1059), not on any break outcome.
+
+### Method
+
+| Piece | What it does |
+| --- | --- |
+| `breakwatch.cusum_alarm` | Two-sided Page CUSUM on the block z-score divided by `sqrt((1+rho)/(1-rho))` (long-run std of an AR(1) sum, `rho` from the formation OU fit), so the sum is a unit-variance walk. Alarm at the first bar with `max(S+, S-) > h` |
+| `formation_trading_backtest(cusum_halt=True)` | Flat from the alarm bar to the block end; the next block starts fresh. Kalman innovations use `rho = 0` |
+| `formation_trading_backtest(gate_p=)` | Engle-Granger (y on x) on the formation window; the whole block stays flat when `p > gate_p`. Records `eg_p`, `gated` |
+
+The break is planted on bar 756 (first bar of a trading block, clean formation window) or on bar 786
+(30 bars into one). Books are compared on common random numbers.
+
+### Calibration on healthy pairs (60 seeds x 16 blocks per half-life)
+
+| Half-life (bars) | CUSUM k=0.25 | **CUSUM k=0.5** | CUSUM k=1.0 | EG gate p<0.01 gates | EG gate p<0.05 gates |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 3 | 31.5% | **5.9%** | 0.2% | 3.8% | 1.5% |
+| 5 | 26.4% | **4.1%** | 0.3% | 20.1% | 5.1% |
+| 10 | 21.9% | **4.5%** | 0.6% | 74.6% | 44.3% |
+| 20 | 21.0% | **4.9%** | 0.7% | 91.9% | 77.0% |
+| 40 | - | - | - | 96.8% | 87.0% |
+
+(CUSUM columns: share of healthy blocks with an alarm at h = 5. Gate columns: share of healthy formation
+windows that fail the gate.) The long-run-variance scaling makes the CUSUM false-alarm rate nearly
+independent of the half-life. The Engle-Granger gate is not: with 252 bars it has little power on a slow
+spread, so it starves a healthy slow pair.
+
+### Results (20 seeds, half-life 5, break on the first bar of a block; Sharpe medians, wins/losses = paired seeds vs `off`)
+
+| Scenario | Book | Sharpe | wins / losses (sign p) | post-break return | max DD | detected (median delay, bars) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| No break | off | **0.52** | - | +1.3% | -1.0% | - |
+| | z stop 4 | 0.34 | 0 / 8 (0.008) | +1.0% | -1.2% | - |
+| | CUSUM halt | 0.44 | 1 / 11 (0.006) | +1.2% | -1.1% | 8 false halts after bar 756 |
+| | EG gate 0.01 | 0.50 | 5 / 9 (0.42) | +1.3% | -1.0% | 22% of blocks gated |
+| | EG gate 0.05 | 0.52 | 2 / 3 (1.0) | +1.3% | -1.0% | 6% gated |
+| Random-walk break | off | **-0.35** | - | -3.2% | -4.3% | - |
+| | z stop 4 | -0.29 | 4 / 16 (0.012) | -3.2% | -4.9% | - |
+| | CUSUM halt | -0.17 | 10 / 8 (0.82) | -2.0% | -4.5% | 19/20 (31) |
+| | EG gate 0.01 | **0.06** | **15 / 5 (0.041)** | **-0.6%** | **-1.3%** | gated, not alarmed |
+| | EG gate 0.05 | -0.03 | 14 / 6 (0.12) | -1.5% | -2.2% | - |
+| | CUSUM + gate 0.05 | -0.01 | 14 / 6 (0.12) | -0.9% | -1.6% | 17/20 (26) |
+| 4-sigma level shift | off | **0.28** | - | +0.5% | -1.8% | - |
+| | z stop 4 | 0.09 | 5 / 15 (0.041) | -0.2% | -2.1% | - |
+| | CUSUM halt | 0.17 | 9 / 11 (0.82) | +0.3% | -1.6% | 20/20 (6.5) |
+| | EG gate 0.01 | 0.28 | 11 / 9 (0.82) | +0.2% | -1.3% | - |
+
+With the break 30 bars into a block (formation window contaminated for four blocks) the gate's advantage
+is smaller and no longer significant: random-walk break Sharpe -0.16 (off) vs 0.11 (gate 0.01), 12 wins /
+8 losses (p = 0.50); level shift 0.16 vs 0.20, 14 / 6 (p = 0.12).
+
+Reading:
+
+- **The formation-window gate is the only re-test that pays on a dead pair, and only for a fast pair.**
+  With the break on a block boundary it turns the median Sharpe from -0.35 to +0.06, cuts the post-break
+  loss from -3.2% to -0.6% and the max drawdown from -4.3% to -1.3%, and wins 15 of 20 seeds (sign p = 0.041,
+  one of many paired comparisons in this table with no multiplicity correction, so read it as suggestive). Cost paid halves because the book is flat
+  91% of the post-break bars. A new generator seed set reproduces the direction of Oct 29 (a stop is not
+  enough) but not its levels: `off` is -0.35 here vs -0.08 there, so medians over 12-20 seeds move a lot.
+- **Its premium is large for anything slower.** It gates 20% of healthy half-life-5 blocks (the no-break
+  Sharpe moves 0.52 to 0.50, 5 wins / 9 losses, not significant) but 75% at half-life 10 and 92% at half-life
+  20: there it is a rule against trading slow pairs, not a break detector. p < 0.05 gates 6% at half-life 5
+  and 44% at half-life 10 but helps less (-0.35 to -0.03).
+- **The CUSUM is a fast alarm that does not pay.** It catches a 4-sigma level shift in a median of 6.5 bars
+  (20/20 seeds) and a random-walk break in 31 bars (19/20), but its Sharpe is not significantly better on a
+  dead pair (10 / 8), is worse on a level shift (0.28 to 0.17, which re-formation absorbs anyway), and its
+  4% per-block false-alarm rate costs a healthy pair 0.08 Sharpe (loses 11 of 12 paired seeds, p = 0.006).
+  Stacking it with the gate does not beat the gate alone (-0.01 vs 0.06).
+- **The Oct 29 z stop is the worst book here.** On a healthy pair it loses on 8 of 8 paired seeds and it
+  loses to `off` on both break types (4 / 16 and 5 / 15). Treat Oct 29's 7/12 random-walk win as a
+  12-seed result that did not replicate on 20 new seeds.
+
+### What the tests check
+
+- CUSUM: hand-computed path, the `rho` scaling is exactly an input rescaling, alarms on a sustained shift
+  (either sign) and not on noise, the alarm cannot depend on later bars, NaN carries state, validation.
+- Walk-forward: off is bit-identical for OLS and Kalman; the book is flat from `halt_bar`; halts concentrate
+  after a planted shift; causal under a late break; a halt never adds trades; a gated block is flat, earns
+  nothing and pays nothing; a looser gate never gates more; gate and CUSUM compose.
+- Calibration: the default false-alarm rate is < 12% at half-lives 3 and 20, `k` is what controls it, and
+  the gate gates > 50% of healthy half-life-20 windows against < 15% at half-life 3.
+- The reading above at reduced scale (8 seeds): `test_nov03_claims.py`.
+
+### Weaknesses
+
+- Still synthetic, one pair at a time, half-life 5 only in the break experiment, two break shapes, and 20
+  seeds, so most paired comparisons are not significant.
+- The gate needs a fast spread; the half-life-10+ premium makes it unusable unless the test is given more
+  bars or the gate is conditioned on the pair's own half-life.
+- A mid-window break contaminates the formation mean, std and `rho` (the CUSUM was silent on a break placed
+  inside a formation window in the first test run), so both re-tests are weakest exactly when a break is
+  most likely to be noticed late.
+- The Kalman hedge was only checked for plumbing (`rho = 0`), not evaluated.
+- The CUSUM drift allowance `k` and level `h` are one null-calibrated pair; a joint calibration over trade
+  duration or an exit-by-block rule instead of "flat to block end" was not tried.
+
 ## Install
 
 ```bash
@@ -515,8 +620,8 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 ## Layout
 
 ```
-src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank
-scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py
+src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank, breakwatch
+scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py, run_nov03_experiments.py, run_nov03_calibration.py
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)
@@ -524,4 +629,4 @@ data/            make_sample.py + sample_ko_pep.csv (sample, not live)
 
 ## What is still out of scope
 
-Johansen-traded eigenvectors, execution at the open, borrow recall / locate, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice; joint `q_alpha` tuning, a flat borrow fee and regularised nested selection landed on Oct 20; planted cointegration breaks and an adverse-z stop-loss landed on Oct 29.
+Johansen-traded eigenvectors, execution at the open, borrow recall / locate, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice; joint `q_alpha` tuning, a flat borrow fee and regularised nested selection landed on Oct 20; planted cointegration breaks and an adverse-z stop-loss landed on Oct 29; a CUSUM halt and an Engle-Granger formation gate landed on Nov 3.

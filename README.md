@@ -589,6 +589,106 @@ Reading:
 - The CUSUM drift allowance `k` and level `h` are one null-calibrated pair; a joint calibration over trade
   duration or an exit-by-block rule instead of "flat to block end" was not tried.
 
+## Nov 8 slice: a gate calibrated to the pair's own half-life
+
+Nov 3 left the Engle-Granger gate "unusable unless the test is given more bars or the gate is conditioned
+on the pair's own half-life": with 252 formation bars a fixed `p < 0.01` keeps a healthy half-life-10 pair
+flat in 75% of blocks. This slice conditions the gate on the half-life and runs the break experiment at
+half-lives 5, 10 and 20 (Nov 3 tried 5 only). Reproduce with `python scripts/run_nov08_calibration.py`
+(~6 min) and `python scripts/run_nov08_experiments.py` (~6 min); synthetic, seeded, offline. Static OLS
+book, 252/63 walk-forward, every traded bar out-of-sample, net of 10 bps per leg. Books, quantiles
+{0.95, 0.90}, the 20 seeds (1200-1219) and both break bars were fixed before the first run.
+
+### Method
+
+| Piece | What it does |
+| --- | --- |
+| `gatecal.calibrated_gate_level(hl, n, quantile)` | Simulates 400 healthy pairs (`make_ou_pair`, own seeds 20000+) with half-life `hl` on `n` bars and returns the `quantile` of their Engle-Granger p-values. A window above that level is worse than 95% (or 90%) of healthy windows for that half-life. Cached on a 5% log grid; an undefined half-life returns 1.0 (never gates) |
+| `formation_trading_backtest(gate_quantile=, gate_ref_half_life=)` | Gates the block when the formation EG p exceeds that level. The reference half-life is given, or estimated on the **first** formation window (the half-life the pair was picked with) and frozen, so a later break cannot move it. Records `gate_level`, `gate_ref_half_life`. Off by default, exclusive with `gate_p` |
+| `run_nov08_experiments.summarise` | Paired sign tests vs `off` and vs the fixed 0.01 gate, plus a Holm adjustment over every comparison in the table (Nov 3 had none) |
+
+Level at 252 bars, q0.95: 0.001 (HL 3), 0.027 (HL 5), 0.29 (HL 10), 0.67 (HL 20), 0.86 (HL 40).
+
+### Premium and power (healthy seeds 1000-1059, dead seeds 1100-1159; share of formation windows gated)
+
+| Half-life | Fixed 0.01: healthy / dead | q0.95 planted HL: healthy / dead | q0.95 estimated HL: healthy / dead | Median estimated HL |
+| ---: | ---: | ---: | ---: | ---: |
+| 3 | 4% / 98% | 10% / 99% | 14% / 100% | 2.6 |
+| 5 | 20% / 98% | 9% / 96% | 22% / 95% | 4.1 |
+| 10 | 75% / 98% | 6% / 68% | 30% / 75% | 6.7 |
+| 20 | 92% / 98% | 4% / 30% | 32% / 55% | 10.2 |
+| 40 | 97% / 98% | 3% / 13% | 36% / 40% | 13.1 |
+
+("Dead" = the spread is a random walk for the whole path.) The calibration does what it says on the
+premium: with the true half-life the gate keeps 3-10% of healthy windows flat at every speed. But it pays
+for it in power, and the slower the pair the more it pays: a dead window has a roughly flat p-value, so a
+level of 0.67 catches only 30% of them. The level cannot invent information the 252-bar test does not have.
+In practice the reference is estimated, and the AR(1) half-life of a 252-bar OLS residual is biased fast
+(median 10.2 for a planted 20), so the estimated-reference gate sits between the two.
+
+### Results (20 seeds, Sharpe medians net of costs; wins / losses = paired seeds; p = sign test, Holm-adjusted in brackets)
+
+| Half-life, scenario | off | Fixed 0.01 | q0.95 estimated | q0.95 planted | Healthy blocks gated (fixed / q0.95 est.) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 5, no break | **0.70** | 0.60 | 0.68 (vs fixed 7/6) | 0.68 (vs fixed 11/0, p 0.001 [0.055]) | 18% / 21% |
+| 5, random walk (bar 756) | -0.31 | 0.07 | 0.12 (vs fixed 10/3, p 0.09) | **0.18** | |
+| 5, random walk (bar 786) | -0.23 | 0.15 | **0.33** (vs fixed 10/2, p 0.039 [1.0]) | 0.21 | |
+| 10, no break | **0.14** | -0.01 | 0.11 (vs fixed 12/7, p 0.36) | 0.09 | 73% / 21% |
+| 10, random walk (bar 756) | -0.60 | **-0.07** | -0.30 (vs fixed 7/12) | -0.39 (vs fixed 3/17, p 0.003 [0.13]) | |
+| 10, random walk (bar 786) | -0.44 | **-0.05** | -0.15 (vs fixed 8/11) | -0.30 | |
+| 20, no break | -0.41 | **0.00** | -0.37 (vs fixed 3/16, p 0.004 [0.20]) | -0.47 | 94% / 27% |
+| 20, random walk (bar 756) | -0.85 | **0.00** | -0.65 (vs fixed 2/17, p 0.001 [0.044]) | -0.79 | |
+| 20, random walk (bar 786) | -0.84 | **0.00** | -0.45 (vs fixed 1/18, p < 0.001 [0.005]) | -0.75 | |
+
+4-sigma level shifts follow the same pattern (HL 5: all books 0.33-0.49; HL 20: fixed 0.00 vs calibrated
+-0.30 to -0.34, calibrated loses 17-19 of 20 paired seeds). Full table: `run_nov08_experiments.py`.
+
+Reading:
+
+- **The calibrated gate stops starving healthy slow pairs, and that does not pay on this book.** At half-life
+  10 it trades 79% of healthy blocks instead of 27% and keeps more of the healthy Sharpe (0.11 vs -0.01 for
+  the fixed gate, 12 / 7, not significant), but on a dead half-life-10 pair it loses to the fixed gate on
+  median (-0.30 vs -0.07), because it misses a quarter of the dead windows.
+- **At half-life 20 the "premium" was nearly free, because the healthy pair loses money anyway.** Ungated, a
+  healthy half-life-20 pair has a median Sharpe of -0.41 after costs: with z 2 / 0.5 and blocks forced flat
+  every 63 bars, a slow spread rarely reverts inside a block. The fixed gate's 94% gating is then the right
+  answer for the wrong reason, and every calibrated book loses to it (Holm p from < 0.001 to 0.20 depending on
+  scenario). This is the most important result of the day: the slow-pair problem is the trading rule and
+  block length, not only the test's power.
+- **At half-life 5 the calibrated gate is roughly a wash with the fixed one.** The planted-reference gate
+  keeps the healthy Sharpe better than the fixed gate (11 / 0, Holm 0.055) and the estimated one cuts a
+  mid-block dead pair's loss more (0.33 vs 0.15, 10 / 2, p 0.039 uncorrected, Holm 1.0). Neither survives
+  the multiplicity correction. The estimated reference (median 4.1 for planted 5) sets a level of 0.005,
+  stricter than the fixed 0.01.
+- **Ships off.** `gate_quantile` is not a clear out-of-sample win anywhere after the Holm correction and is a
+  clear loss on slow pairs. The fixed `gate_p` (also off by default) is unchanged.
+
+### What the tests check
+
+- Level: rises with the half-life, reproducible, monotone in the quantile, equal to the EG p of the seeded
+  pairs, gates 3-20% of fresh healthy windows at q0.90, never gates on an undefined reference, validation.
+- Walk-forward: off is the legacy book; the fixed gate records its level; the reference is the first
+  formation window's half-life and frozen; an explicit reference overrides it; gated blocks are flat and
+  cost-free; a slow healthy pair is gated far less than by the fixed gate; causal under a late break;
+  exclusive with `gate_p`.
+- Calibration at reduced scale (6 seeds, HL 20): premium < 20% vs > 70%, power < 60% vs > 90%, estimated
+  reference biased fast: `test_nov08_calibration.py`.
+- The reading above at reduced scale (8 seeds, HL 10 and 20, aligned break): `test_nov08_claims.py`.
+
+### Weaknesses
+
+- Still synthetic, one pair at a time, two break shapes, 20 seeds per cell; after the Holm correction only
+  the large half-life-20 differences are significant.
+- A healthy half-life-20 pair loses money on this book (z 2 / 0.5, 63-bar blocks, forced flat). Before any
+  gate can help a slow pair, the trading rule needs a longer block or no forced block-end exit, and that
+  was not tried.
+- The first-window half-life estimate is biased fast (about half the planted value at 20); a
+  median-unbiased reference was not tried, and the planted-reference results suggest it would gate less
+  and catch fewer breaks.
+- The gate is still a 252-bar test; a longer look-back for the test only (more power on slow spreads, slower
+  to see a break) was not tried.
+- The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
+
 ## Install
 
 ```bash
@@ -620,8 +720,8 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 ## Layout
 
 ```
-src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank, breakwatch
-scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py, run_nov03_experiments.py, run_nov03_calibration.py
+src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank, breakwatch, gatecal
+scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py, run_nov03_experiments.py, run_nov03_calibration.py, run_nov08_experiments.py, run_nov08_calibration.py
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)
@@ -629,4 +729,4 @@ data/            make_sample.py + sample_ko_pep.csv (sample, not live)
 
 ## What is still out of scope
 
-Johansen-traded eigenvectors, execution at the open, borrow recall / locate, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice; joint `q_alpha` tuning, a flat borrow fee and regularised nested selection landed on Oct 20; planted cointegration breaks and an adverse-z stop-loss landed on Oct 29; a CUSUM halt and an Engle-Granger formation gate landed on Nov 3.
+Johansen-traded eigenvectors, execution at the open, borrow recall / locate, taxes, a bundled public tape, and any claim that a backtest Sharpe survives contact with a broker. Ranking/capping of re-screened discoveries and an OU time-stop on formation/re-screen books landed in the Oct 14 slice; joint `q_alpha` tuning, a flat borrow fee and regularised nested selection landed on Oct 20; planted cointegration breaks and an adverse-z stop-loss landed on Oct 29; a CUSUM halt and an Engle-Granger formation gate landed on Nov 3; a half-life-calibrated gate level (`gate_quantile`, off) landed on Nov 8.

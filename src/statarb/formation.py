@@ -223,6 +223,8 @@ def formation_trading_backtest(
     cusum_k: float = K_SLACK,
     cusum_h: float = H_ALARM,
     gate_p: float | None = None,
+    gate_quantile: float | None = None,
+    gate_ref_half_life: float | None = None,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
@@ -243,6 +245,14 @@ def formation_trading_backtest(
     block stays flat when the p-value exceeds ``gate_p`` (``windows["eg_p"]``,
     ``windows["gated"]``). It reads formation bars only, so it is causal, and it
     can only act once the break is inside the formation window.
+    ``gate_quantile`` (off by default; exclusive with ``gate_p``) replaces the
+    fixed level with a half-life-calibrated one (``statarb.gatecal``): the
+    block stays flat when the formation EG p exceeds the ``gate_quantile`` of
+    p-values that simulated *healthy* pairs with the reference half-life show
+    on the same window length. The reference is ``gate_ref_half_life`` if given,
+    else the OU half-life of the *first* formation window (the half-life the
+    pair was picked with), frozen for the whole run, so a later break cannot
+    move it. ``windows["gate_level"]`` records the level used.
     """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
@@ -253,7 +263,24 @@ def formation_trading_backtest(
         raise ValueError("Sample shorter than one formation + trading window.")
     if borrow_bps < 0:
         raise ValueError("borrow_bps must be >= 0")
+    if gate_p is not None and gate_quantile is not None:
+        raise ValueError("gate_p and gate_quantile are exclusive")
     yv, xv = both["y"].to_numpy(), both["x"].to_numpy()
+    gate_level = float("nan") if gate_p is None else float(gate_p)
+    ref_hl = float("nan")
+    if gate_quantile is not None:
+        from .gatecal import calibrated_gate_level
+        from .ou import fit_ou
+        from .rank import formation_residual
+
+        if gate_ref_half_life is not None:
+            ref_hl = float(gate_ref_half_life)
+        else:
+            try:
+                ref_hl = fit_ou(formation_residual(yv[:formation], xv[:formation])).half_life
+            except ValueError:
+                ref_hl = float("nan")
+        gate_level = calibrated_gate_level(ref_hl, formation, quantile=gate_quantile)
     rate = (float(spread_bps) + float(slippage_bps)) / 1e4
 
     n = len(both)
@@ -288,11 +315,11 @@ def formation_trading_backtest(
                 max_hold = None
         eg_p = float("nan")
         gated = False
-        if gate_p is not None:
+        if gate_p is not None or gate_quantile is not None:
             from .cointegration import engle_granger
 
             eg_p = engle_granger(pd.Series(yv[f_sl]), pd.Series(xv[f_sl])).pvalue
-            gated = bool(eg_p > float(gate_p))
+            gated = bool(eg_p > gate_level)
         pos = mean_reversion_positions(
             pd.Series(z), z_enter=z_enter, z_exit=z_exit, max_hold=max_hold, z_stop=z_stop
         ).to_numpy(dtype=float, copy=True)
@@ -346,6 +373,8 @@ def formation_trading_backtest(
                 "halt_bar": halt_bar,
                 "eg_p": eg_p,
                 "gated": gated,
+                "gate_level": gate_level,
+                "gate_ref_half_life": ref_hl,
             }
         )
         start += trading

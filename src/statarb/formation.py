@@ -111,11 +111,16 @@ def _window_signal(
 
 
 def _block_pnl(
-    y: np.ndarray, x: np.ndarray, pos: np.ndarray, beta: np.ndarray, rate: float, n_legs: int
+    y: np.ndarray, x: np.ndarray, pos: np.ndarray, beta: np.ndarray, rate: float, n_legs: int,
+    carry: tuple[float, float, float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-bar (gross pnl return, trade cost, re-hedge cost) for one trading block.
 
     Bar i's return is earned by the book held from close i-1 to close i.
+    ``carry = (pos, beta, y, x)`` of the previous block's last bar, when a
+    position was carried over the block boundary: bar 0 then earns that
+    position's return over the gap, and pays the trade or re-hedge cost of
+    moving from it to bar 0's book.
     """
     n = len(y)
     gross_ret = np.zeros(n)
@@ -123,6 +128,10 @@ def _block_pnl(
     rehedge = np.zeros(n)
     notional = np.abs(y) + np.abs(beta) * np.abs(x)
     prev_pos, prev_beta = 0.0, beta[0]
+    if carry is not None and carry[0] != 0.0:
+        c_pos, c_beta, c_y, c_x = (float(v) for v in carry)
+        gross_ret[0] = c_pos * ((y[0] - c_y) - c_beta * (x[0] - c_x)) / (abs(c_y) + abs(c_beta) * abs(c_x))
+        prev_pos, prev_beta = c_pos, c_beta
     for i in range(n):
         if i > 0 and prev_pos != 0.0:
             gross_ret[i] = prev_pos * ((y[i] - y[i - 1]) - beta[i - 1] * (x[i] - x[i - 1])) / notional[i - 1]
@@ -135,7 +144,8 @@ def _block_pnl(
 
 
 def _borrow_cost(
-    y: np.ndarray, x: np.ndarray, pos: np.ndarray, beta: np.ndarray, borrow_bps: float
+    y: np.ndarray, x: np.ndarray, pos: np.ndarray, beta: np.ndarray, borrow_bps: float,
+    carry: tuple[float, float, float, float] | None = None,
 ) -> np.ndarray:
     """Per-bar borrow fee for one trading block (bar i pays for the book held over (i-1, i]).
 
@@ -151,6 +161,10 @@ def _borrow_cost(
     p = pos[:-1]
     short = np.where(p > 0, np.abs(beta[:-1]) * np.abs(x[:-1]), np.where(p < 0, np.abs(y[:-1]), 0.0))
     out[1:] = daily * np.abs(p) * short / notional[:-1]
+    if carry is not None and carry[0] != 0.0:
+        c_pos, c_beta, c_y, c_x = (float(v) for v in carry)
+        c_short = abs(c_beta) * abs(c_x) if c_pos > 0 else abs(c_y)
+        out[0] = daily * abs(c_pos) * c_short / (abs(c_y) + abs(c_beta) * abs(c_x))
     return out
 
 
@@ -225,6 +239,7 @@ def formation_trading_backtest(
     gate_p: float | None = None,
     gate_quantile: float | None = None,
     gate_ref_half_life: float | None = None,
+    carry_over: bool = False,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
@@ -253,6 +268,15 @@ def formation_trading_backtest(
     else the OU half-life of the *first* formation window (the half-life the
     pair was picked with), frozen for the whole run, so a later break cannot
     move it. ``windows["gate_level"]`` records the level used.
+    ``carry_over`` (off by default) drops the forced flat at the end of every
+    block but the last: an open position is carried into the next block, which
+    starts its book in that position (``mean_reversion_positions(initial_position=)``)
+    and exits it on the *new* block's z (new formation fit). Bar 0 of the next
+    block earns the carried position's return over the boundary under the old
+    hedge and pays the re-hedge (or exit) cost of moving to the new one; borrow
+    accrues over the gap. A gated block or a CUSUM halt closes a carried
+    position on its first bar (gated) or alarm bar. The final block still ends
+    flat. ``windows["carried_in"]`` records the carried position.
     """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
@@ -291,7 +315,10 @@ def formation_trading_backtest(
     trades = 0
     win_rows = []
     start = 0
+    carry: tuple[float, float, float, float] | None = None  # (pos, beta, y, x) at the last block's end
+    carry_held = 0
     while start + formation + trading <= n:
+        last_block = start + 2 * trading + formation > n
         f_sl = slice(start, start + formation)
         t_sl = slice(start + formation, start + formation + trading)
         z, beta, beta_f = _window_signal(
@@ -320,10 +347,14 @@ def formation_trading_backtest(
 
             eg_p = engle_granger(pd.Series(yv[f_sl]), pd.Series(xv[f_sl])).pvalue
             gated = bool(eg_p > gate_level)
+        c_pos = carry[0] if carry is not None else 0.0
+        if not np.isfinite(np.asarray(z, dtype=float)[0]):
+            c_pos = 0.0
         pos = mean_reversion_positions(
-            pd.Series(z), z_enter=z_enter, z_exit=z_exit, max_hold=max_hold, z_stop=z_stop
+            pd.Series(z), z_enter=z_enter, z_exit=z_exit, max_hold=max_hold, z_stop=z_stop,
+            initial_position=c_pos, initial_held=carry_held if c_pos != 0.0 else 0,
         ).to_numpy(dtype=float, copy=True)
-        prev_raw = np.concatenate([[0.0], pos[:-1]])
+        prev_raw = np.concatenate([[c_pos], pos[:-1]])
         n_zstop = 0 if z_stop is None else int(
             ((prev_raw != 0) & (pos == 0) & (-prev_raw * np.asarray(z, dtype=float) > float(z_stop))).sum()
         )
@@ -345,15 +376,16 @@ def formation_trading_backtest(
             if alarm is not None:
                 halt_bar = float(alarm)
                 pos[alarm:] = 0.0
-        pos[-1] = 0.0  # forced flat at block end
-        g, c, rh = _block_pnl(yv[t_sl], xv[t_sl], pos, beta, rate, n_legs)
-        bw = _borrow_cost(yv[t_sl], xv[t_sl], pos, beta, borrow_bps)
+        if not carry_over or last_block:
+            pos[-1] = 0.0  # forced flat at block end
+        g, c, rh = _block_pnl(yv[t_sl], xv[t_sl], pos, beta, rate, n_legs, carry=carry)
+        bw = _borrow_cost(yv[t_sl], xv[t_sl], pos, beta, borrow_bps, carry=carry)
         r = g - c - rh - bw
         idx = both.index[t_sl]
         rets.loc[idx] = r
         pos_s.loc[idx] = pos
         beta_s.loc[idx] = beta
-        prev = np.concatenate([[0.0], pos[:-1]])
+        prev = np.concatenate([[carry[0] if carry is not None else 0.0], pos[:-1]])
         n_tr = int(((prev == 0) & (pos != 0)).sum() + ((prev != 0) & (pos != 0) & (prev != pos)).sum())
         trades += n_tr
         cost_total += float(c.sum() + rh.sum() + bw.sum())
@@ -375,8 +407,20 @@ def formation_trading_backtest(
                 "gated": gated,
                 "gate_level": gate_level,
                 "gate_ref_half_life": ref_hl,
+                "carried_in": float(carry[0]) if carry is not None else 0.0,
             }
         )
+        if carry_over and pos[-1] != 0.0:
+            run = 0
+            for v in pos[::-1]:
+                if v != pos[-1]:
+                    break
+                run += 1
+            same = carry is not None and run == len(pos) and carry[0] == pos[-1]
+            carry_held = run + (carry_held if same else 0)
+            carry = (float(pos[-1]), float(beta[-1]), float(yv[t_sl][-1]), float(xv[t_sl][-1]))
+        else:
+            carry, carry_held = None, 0
         start += trading
 
     traded = rets.dropna()

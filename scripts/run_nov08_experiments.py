@@ -51,7 +51,7 @@ def run(seeds=SEEDS, half_lives=HALF_LIVES, breaks=BREAKS, scenarios=SCENARIOS, 
                     cut = p.y.index[break_at]
                     for book, kw in books.items():
                         kw = {k: (hl if v == ORACLE else v) for k, v in kw.items()}
-                        r = formation_trading_backtest(p.y, p.x, hedge="ols", **kw)
+                        r = formation_trading_backtest(p.y, p.x, hedge="ols", **kw, carry_over=False)
                         w = r.windows
                         post_w = w["trade_end"] >= cut
                         post = r.returns.loc[cut:]

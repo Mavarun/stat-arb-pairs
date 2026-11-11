@@ -194,6 +194,7 @@ def tune_q(
                 slippage_bps=slippage_bps,
                 n_legs=n_legs,
                 borrow_bps=borrow_bps,
+                carry_over=False,
             )
             ws_all = [
                 float(_sharpe(res.returns.loc[w["trade_start"] : w["trade_end"]]))
@@ -346,6 +347,7 @@ def nested_kalman_backtest(
             slippage_bps=slippage_bps,
             n_legs=n_legs,
             borrow_bps=borrow_bps,
+            carry_over=False,
         )
         rets.loc[block.returns.index] = block.returns
         cost_total += block.cost_paid
@@ -396,7 +398,7 @@ def compare_fixed_vs_nested(
         for k, v in kwargs.items()
         if k not in ("inner_formation", "inner_trading", "q_grid", "selection", "sign_alpha", "q_alpha_grid")
     }
-    fixed = formation_trading_backtest(y, x, hedge="kalman", q_beta=Q_BETA, **fixed_kw)
+    fixed = formation_trading_backtest(y, x, hedge="kalman", q_beta=Q_BETA, **fixed_kw, carry_over=False)
     nested = nested_kalman_backtest(y, x, q_grid=q_grid, **kwargs)
     return pd.DataFrame(
         {

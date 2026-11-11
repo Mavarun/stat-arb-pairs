@@ -44,7 +44,7 @@ def run(seeds=SEEDS, breaks=BREAKS, scenarios=SCENARIOS, books=None) -> pd.DataF
                 p = make_broken_pair(N, break_at=break_at, kind=kind, half_life=HALF_LIFE, shift_sigmas=4.0, seed=s)
                 cut = p.y.index[break_at]
                 for book, kw in books.items():
-                    r = formation_trading_backtest(p.y, p.x, hedge="ols", **kw)
+                    r = formation_trading_backtest(p.y, p.x, hedge="ols", **kw, carry_over=False)
                     w = r.windows
                     post_w = w["trade_end"] >= cut
                     pre_w = ~post_w

@@ -48,7 +48,7 @@ def selection_rules_by_drift(joint_q_alpha: bool = False) -> pd.DataFrame:
             kw = {} if path is None else {"beta_path": path}
             p = make_ou_pair(n, half_life=5, seed=500 + s, **kw)
             fixed = formation_trading_backtest(p.y, p.x, hedge="kalman", q_beta=Q_BETA,
-                                               formation=FORMATION, trading=TRADING)
+                                               formation=FORMATION, trading=TRADING, carry_over=False)
             res["fixed"].append({"sharpe": fixed.sharpe, "total_return": fixed.total_return,
                                  "frac_default": 1.0, "q_alpha": Q_ALPHA})
             for rule in rules:
@@ -88,7 +88,7 @@ def borrow_sensitivity() -> pd.DataFrame:
             uni.append(r.as_dict())
             p = make_ou_pair(n, half_life=5, seed=700 + s)
             f = formation_trading_backtest(p.y, p.x, hedge="ols", formation=FORMATION,
-                                           trading=TRADING, borrow_bps=bps)
+                                           trading=TRADING, borrow_bps=bps, carry_over=False)
             single.append(f.as_dict())
         for label, rows in (("bh_rescreen_universe", uni), ("single_pair_ols", single)):
             df = pd.DataFrame(rows)
@@ -117,7 +117,7 @@ def auto_time_stop() -> pd.DataFrame:
             p = make_ou_pair(n, half_life=5, seed=seed0 + s, **kw)
             for label, on, k in variants:
                 r = formation_trading_backtest(p.y, p.x, hedge="ols", formation=FORMATION,
-                                               trading=TRADING, use_time_stop=on, time_stop_multiple=k)
+                                               trading=TRADING, use_time_stop=on, time_stop_multiple=k, carry_over=False)
                 rows[label].append(r.as_dict())
                 if label == "auto":
                     ks.extend(r.windows["time_stop_multiple"].tolist())

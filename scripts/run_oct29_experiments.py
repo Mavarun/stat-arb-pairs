@@ -41,7 +41,7 @@ def run() -> pd.DataFrame:
             p = make_broken_pair(N, break_at=BREAK_AT, kind=kind, half_life=HALF_LIFE, shift_sigmas=4.0, seed=s)
             cut = p.y.index[BREAK_AT]
             for book, kw in BOOKS.items():
-                r = formation_trading_backtest(p.y, p.x, hedge="ols", **kw)
+                r = formation_trading_backtest(p.y, p.x, hedge="ols", **kw, carry_over=False)
                 post = r.returns.loc[cut:]
                 w = r.windows
                 rows.append({

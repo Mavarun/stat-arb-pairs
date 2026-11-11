@@ -12,12 +12,15 @@ def _slow(seed=11):
     return make_ou_pair(1260, half_life=20.0, seed=seed)
 
 
-def test_off_is_the_legacy_book() -> None:
+def test_carry_is_the_default_since_nov11_and_false_is_the_legacy_book() -> None:
     p = _slow()
     a = formation_trading_backtest(p.y, p.x)
-    b = formation_trading_backtest(p.y, p.x, carry_over=False)
+    b = formation_trading_backtest(p.y, p.x, carry_over=True)
     assert a.returns.equals(b.returns)
-    assert (b.windows["carried_in"] == 0.0).all()
+    legacy = formation_trading_backtest(p.y, p.x, carry_over=False)
+    assert (legacy.windows["carried_in"] == 0.0).all()
+    ends = legacy.positions.loc[legacy.windows["trade_end"]]
+    assert (ends == 0.0).all()
 
 
 def test_slow_pair_carries_positions_and_the_last_block_ends_flat() -> None:

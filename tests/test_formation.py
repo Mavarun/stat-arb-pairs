@@ -8,7 +8,7 @@ from statarb.synth import make_ou_pair
 
 def test_window_count_and_no_trading_inside_first_formation():
     p = make_ou_pair(252 + 63 * 4 + 10, seed=3)
-    res = formation_trading_backtest(p.y, p.x, hedge="ols")
+    res = formation_trading_backtest(p.y, p.x, hedge="ols", carry_over=False)
     assert res.n_windows == 4
     # nothing is traded before the first formation window ends
     assert res.returns.index[0] == p.y.index[252]
@@ -18,7 +18,7 @@ def test_window_count_and_no_trading_inside_first_formation():
 def test_positions_forced_flat_at_every_block_end():
     p = make_ou_pair(252 + 63 * 5, seed=4)
     for hedge in ("ols", "kalman"):
-        res = formation_trading_backtest(p.y, p.x, hedge=hedge)
+        res = formation_trading_backtest(p.y, p.x, hedge=hedge, carry_over=False)
         ends = res.windows["trade_end"]
         assert (res.positions.loc[ends] == 0).all()
 
@@ -28,17 +28,17 @@ def test_backtest_is_causal_future_break_does_not_change_earlier_blocks():
     y2 = p.y.copy()
     y2.iloc[252 + 63 * 3 :] += 40.0  # break inside the last trading block only
     for hedge in ("ols", "kalman"):
-        a = formation_trading_backtest(p.y, p.x, hedge=hedge).returns
-        b = formation_trading_backtest(y2, p.x, hedge=hedge).returns
+        a = formation_trading_backtest(p.y, p.x, hedge=hedge, carry_over=False).returns
+        b = formation_trading_backtest(y2, p.x, hedge=hedge, carry_over=False).returns
         cut = p.y.index[252 + 63 * 3 - 1]
         pd.testing.assert_series_equal(a.loc[:cut], b.loc[:cut])
 
 
 def test_costs_monotone_and_zero_cost_matches_gross():
     p = make_ou_pair(252 + 63 * 6, half_life=5, seed=6)
-    free = formation_trading_backtest(p.y, p.x, spread_bps=0, slippage_bps=0)
-    paid = formation_trading_backtest(p.y, p.x, spread_bps=5, slippage_bps=5)
-    dear = formation_trading_backtest(p.y, p.x, spread_bps=20, slippage_bps=20)
+    free = formation_trading_backtest(p.y, p.x, spread_bps=0, slippage_bps=0, carry_over=False)
+    paid = formation_trading_backtest(p.y, p.x, spread_bps=5, slippage_bps=5, carry_over=False)
+    dear = formation_trading_backtest(p.y, p.x, spread_bps=20, slippage_bps=20, carry_over=False)
     assert free.cost_paid == 0.0
     assert free.trades > 0
     assert np.isclose(free.returns.sum(), free.gross_return_sum)
@@ -47,8 +47,8 @@ def test_costs_monotone_and_zero_cost_matches_gross():
 
 def test_static_hedge_never_pays_rehedge_cost_kalman_does():
     p = make_ou_pair(252 + 63 * 6, half_life=5, seed=7)
-    ols = formation_trading_backtest(p.y, p.x, hedge="ols")
-    kal = formation_trading_backtest(p.y, p.x, hedge="kalman")
+    ols = formation_trading_backtest(p.y, p.x, hedge="ols", carry_over=False)
+    kal = formation_trading_backtest(p.y, p.x, hedge="kalman", carry_over=False)
     assert ols.rehedge_cost == 0.0
     assert kal.rehedge_cost > 0.0
 
@@ -93,18 +93,18 @@ def test_static_hedge_is_not_worse_when_beta_is_truly_constant():
 def test_input_validation():
     p = make_ou_pair(300, seed=9)
     with pytest.raises(ValueError):
-        formation_trading_backtest(p.y, p.x)  # shorter than F + T
+        formation_trading_backtest(p.y, p.x, carry_over=False)  # shorter than F + T
     with pytest.raises(ValueError):
-        formation_trading_backtest(p.y, p.x, formation=10)
+        formation_trading_backtest(p.y, p.x, formation=10, carry_over=False)
     with pytest.raises(ValueError):
-        formation_trading_backtest(p.y, p.x, hedge="lasso", formation=100, trading=50)
+        formation_trading_backtest(p.y, p.x, hedge="lasso", formation=100, trading=50, carry_over=False)
 
 
 def test_time_stop_flattens_relative_to_no_stop_on_slow_spread():
     # Long half-life + aggressive multiple=1 so the stop binds inside 63 bars.
     p = make_ou_pair(252 + 63 * 4, half_life=30.0, seed=44)
     off = formation_trading_backtest(
-        p.y, p.x, hedge="ols", formation=252, trading=63, use_time_stop=False
+        p.y, p.x, hedge="ols", formation=252, trading=63, use_time_stop=False, carry_over=False
     )
     on = formation_trading_backtest(
         p.y,
@@ -114,6 +114,7 @@ def test_time_stop_flattens_relative_to_no_stop_on_slow_spread():
         trading=63,
         use_time_stop=True,
         time_stop_multiple=1.0,
+        carry_over=False,
     )
     assert list(off.returns.index) == list(on.returns.index)
     # Time stop should not increase the number of bars held at |pos|=1 forever;
@@ -130,6 +131,7 @@ def test_time_stop_flattens_relative_to_no_stop_on_slow_spread():
         trading=63,
         use_time_stop=True,
         time_stop_multiple=1.0,
+        carry_over=False,
     )
     cut = p.y.index[cut_i - 1]
     pd.testing.assert_series_equal(on.returns.loc[:cut], on_b.returns.loc[:cut])
@@ -137,9 +139,9 @@ def test_time_stop_flattens_relative_to_no_stop_on_slow_spread():
 
 def test_time_stop_off_matches_legacy_path():
     p = make_ou_pair(252 + 63 * 3, half_life=8.0, seed=45)
-    a = formation_trading_backtest(p.y, p.x, hedge="ols", formation=252, trading=63)
+    a = formation_trading_backtest(p.y, p.x, hedge="ols", formation=252, trading=63, carry_over=False)
     b = formation_trading_backtest(
-        p.y, p.x, hedge="ols", formation=252, trading=63, use_time_stop=False
+        p.y, p.x, hedge="ols", formation=252, trading=63, use_time_stop=False, carry_over=False
     )
     pd.testing.assert_series_equal(a.returns, b.returns)
     assert a.trades == b.trades

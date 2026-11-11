@@ -73,8 +73,15 @@ def mean_reversion_positions(
     z_exit: float = Z_EXIT,
     max_hold: int | None = None,
     z_stop: float | None = None,
+    initial_position: float = 0.0,
+    initial_held: int = 0,
 ) -> pd.Series:
     """Stateful mean-reversion book from a z-score series.
+
+    ``initial_position`` / ``initial_held`` start the book in a position carried
+    in from an earlier block (default flat, the legacy book): the position is
+    held until this series' z says exit, and the time stop counts the bars it
+    was already held.
 
     NaN z-scores force a flat book (we do not carry a position through undefined z).
     ``max_hold`` (bars, optional) is a time stop and ``z_stop`` an adverse-z
@@ -89,10 +96,14 @@ def mean_reversion_positions(
     if z_stop is not None and not float(z_stop) > z_enter:
         raise ValueError("z_stop must be > z_enter")
 
+    if initial_position not in (-1.0, 0.0, 1.0):
+        raise ValueError("initial_position must be -1, 0 or +1")
+    if initial_held < 0 or (initial_position == 0.0 and initial_held != 0):
+        raise ValueError("initial_held must be >= 0, and 0 when flat")
     z_arr = pd.Series(z, dtype=float).to_numpy()
     pos = np.zeros(len(z_arr), dtype=float)
-    current = 0.0
-    held = 0
+    current = float(initial_position)
+    held = int(initial_held)
     blocked = 0.0  # side that hit the time stop; cannot re-enter until |z| < z_enter
     for i, zi in enumerate(z_arr):
         if not np.isfinite(zi):

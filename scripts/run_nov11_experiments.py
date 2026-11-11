@@ -30,12 +30,14 @@ SEEDS = range(1300, 1320)
 N = 1260
 HALF_LIVES = (5.0, 10.0, 20.0)
 SCENARIOS = (("no break", "none", 756), ("random walk (756)", "random_walk", 756), ("random walk (786)", "random_walk", 786))
+# ``off`` is the forced-flat book every earlier slice ran (``carry_over=False`` is explicit
+# because the default became ``True`` after this experiment).
 BOOKS = {
-    "off": {},
-    "126-bar blocks": {"trading": 126},
-    "252-bar blocks": {"trading": 252},
+    "off": {"carry_over": False},
+    "126-bar blocks": {"trading": 126, "carry_over": False},
+    "252-bar blocks": {"trading": 252, "carry_over": False},
     "carry": {"carry_over": True},
-    "EG gate 0.01": {"gate_p": 0.01},
+    "EG gate 0.01": {"gate_p": 0.01, "carry_over": False},
     "carry + EG gate 0.01": {"carry_over": True, "gate_p": 0.01},
 }
 
@@ -74,7 +76,7 @@ def run(seeds=SEEDS, half_lives=HALF_LIVES, scenarios=SCENARIOS, books=None) -> 
                         "sharpe": r.sharpe, "total_return": r.total_return,
                         "post_return": float((1 + post).prod() - 1), "max_dd": r.max_drawdown,
                         "cost": r.cost_paid, "trades": r.trades, "n_bars": len(r.returns),
-                        "forced_exit_share": forced_exit_share(r, carry=bool(kw.get("carry_over"))),
+                        "forced_exit_share": forced_exit_share(r, carry=bool(kw["carry_over"])),
                     })
     return pd.DataFrame(rows)
 

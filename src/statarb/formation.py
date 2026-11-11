@@ -15,9 +15,13 @@ filtered bar by bar through the trading block. The signal is the innovation
 z-score (prior state, so it has not seen bar t); the hedge held over (t, t+1]
 is the filtered ``beta[t]``.
 
-Both books use the same ``mean_reversion_positions`` rule and thresholds, start
-flat at the first trading bar and are forced flat on the last one, so no
-position or state leaks between blocks except through the formation data.
+Both books use the same ``mean_reversion_positions`` rule and thresholds. With
+``carry_over=False`` (the book of every slice before Nov 11) they start flat at
+the first trading bar and are forced flat on the last one, so no position or
+state leaks between blocks except through the formation data. The default
+``carry_over=True`` carries an open position into the next block instead (see
+``formation_trading_backtest``); only the position itself crosses the boundary,
+the next block's hedge and z come from its own formation window.
 
 Accounting (identical code path for both hedges)::
 
@@ -239,7 +243,7 @@ def formation_trading_backtest(
     gate_p: float | None = None,
     gate_quantile: float | None = None,
     gate_ref_half_life: float | None = None,
-    carry_over: bool = False,
+    carry_over: bool = True,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
@@ -268,7 +272,8 @@ def formation_trading_backtest(
     else the OU half-life of the *first* formation window (the half-life the
     pair was picked with), frozen for the whole run, so a later break cannot
     move it. ``windows["gate_level"]`` records the level used.
-    ``carry_over`` (off by default) drops the forced flat at the end of every
+    ``carry_over`` (on by default since 2026-11-11; ``False`` is the forced-flat
+    book of every earlier slice) drops the forced flat at the end of every
     block but the last: an open position is carried into the next block, which
     starts its book in that position (``mean_reversion_positions(initial_position=)``)
     and exits it on the *new* block's z (new formation fit). Bar 0 of the next

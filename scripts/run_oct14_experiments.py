@@ -165,7 +165,7 @@ def time_stop_on_drift() -> pd.DataFrame:
     for s in range(N_SEEDS_DRIFT):
         p = make_ou_pair(n, half_life=5, beta_path=path, seed=600 + s)
         off = formation_trading_backtest(
-            p.y, p.x, hedge="ols", formation=FORMATION, trading=TRADING, use_time_stop=False
+            p.y, p.x, hedge="ols", formation=FORMATION, trading=TRADING, use_time_stop=False, carry_over=False
         )
         on = formation_trading_backtest(
             p.y,
@@ -175,6 +175,7 @@ def time_stop_on_drift() -> pd.DataFrame:
             trading=TRADING,
             use_time_stop=True,
             time_stop_multiple=3.0,
+            carry_over=False,
         )
         rows["off"].append(off.as_dict())
         rows["on_3x"].append(on.as_dict())

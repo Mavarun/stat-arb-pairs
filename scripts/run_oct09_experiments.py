@@ -132,7 +132,7 @@ def oracle_vs_rescreen() -> pd.DataFrame:
         pair = next(iter(truth))
         a, b = sorted(pair)
         oracle = formation_trading_backtest(
-            frame[a], frame[b], hedge="ols", formation=FORMATION, trading=TRADING
+            frame[a], frame[b], hedge="ols", formation=FORMATION, trading=TRADING, carry_over=False
         )
         screened = universe_formation_backtest(
             frame, rule="bh", hedge="ols", formation=FORMATION, trading=TRADING

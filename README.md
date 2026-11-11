@@ -689,6 +689,88 @@ Reading:
   to see a break) was not tried.
 - The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
 
+## Nov 11 slice: carry positions across blocks instead of forcing them flat
+
+Nov 8 found that a healthy half-life-20 pair loses money ungated (median Sharpe -0.41 after costs). The guess
+was that the trading rule causes it, not the test: with z 2 / 0.5 and every 63-bar block forced flat, a slow
+spread rarely reverts inside a block. This slice tests that guess directly with longer blocks and with no
+forced block-end exit. Reproduce with `python scripts/run_nov11_experiments.py` (~1 min). The data is
+synthetic, seeded and offline. Static OLS book, 252-bar formation, net of 10 bps per leg. Every traded bar is
+out-of-sample, and every book trades the same 1008 bars of a 1260-bar path. The books, half-lives {5, 10, 20},
+20 new seeds (1300-1319), the three scenarios and the decision rule were all fixed before the first run.
+After the first run one diagnostic was corrected: the forced-exit share had counted a carried position at a
+block end as a forced exit. No Sharpe number changed.
+
+### Method
+
+| Piece | What it does |
+| --- | --- |
+| `mean_reversion_positions(initial_position=, initial_held=)` | Starts the book in a position carried in from an earlier block. The position exits on this series' z, and the time stop counts the bars already held. Flat is the legacy book |
+| `formation_trading_backtest(carry_over=)` | Drops the forced flat at every block end except the last. Bar 0 of the next block earns the carried position's return over the boundary under the old hedge, then pays the re-hedge cost (or the exit cost) of moving to the new block's hedge. Borrow accrues over the gap. The position exits on the new block's z (new formation fit). A gated block or a CUSUM halt closes the position. `windows["carried_in"]` records it |
+| `run_nov11_experiments` | Compares `off` (forced flat, 63-bar blocks; every earlier slice), 126- and 252-bar blocks, `carry`, and the fixed EG gate 0.01 with and without carry. It reports the share of exits the block end forced, and runs paired sign tests vs `off` with a Holm adjustment over all 45 comparisons |
+
+Decision rule (fixed beforehand): `carry_over` becomes the default only if it beats `off` on median Sharpe
+in every half-life's no-break row, with Holm p < 0.05 in at least one, and loses no break row on median
+Sharpe. Block length is a parameter and is reported but not shipped.
+
+### Results (20 seeds, Sharpe medians net of costs; wins / losses vs `off` on paired seeds; Holm-adjusted sign-test p in brackets)
+
+| Half-life, scenario | off | 126-bar | 252-bar | carry | EG gate 0.01 | carry + gate | Exits forced by block end (off / carry) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5, no break | 0.63 | 0.55 (13/7) | 0.70 (15/5) | **0.82** (20/0 [< 0.001]) | 0.55 (3/10) | 0.70 (17/3 [0.046]) | 18% / 1% |
+| 5, random walk (756) | -0.16 | 0.06 | 0.13 | -0.02 (18/2 [0.011]) | 0.14 | **0.23** (18/2 [0.011]) | 39% / 4% |
+| 5, random walk (786) | -0.07 | -0.09 | 0.07 | 0.05 (19/1 [0.001]) | 0.28 | **0.44** (17/3 [0.046]) | 38% / 4% |
+| 10, no break | 0.14 | 0.26 | **0.31** | **0.31** (19/0 [< 0.001]) | 0.02 | 0.06 | 27% / 2% |
+| 10, random walk (756) | -0.35 | -0.18 | -0.09 | -0.14 (19/1 [0.001]) | -0.00 | **0.00** | 45% / 5% |
+| 10, random walk (786) | -0.39 | -0.29 | -0.09 | -0.09 (19/1 [0.001]) | **-0.00** | -0.01 | 46% / 5% |
+| 20, no break | -0.53 | -0.29 | -0.08 | -0.18 (20/0 [< 0.001]) | **-0.00** | -0.01 | 46% / 3% |
+| 20, random walk (756) | -0.80 | -0.45 | -0.38 | -0.46 (20/0 [< 0.001]) | **0.00** | **0.00** | 60% / 6% |
+| 20, random walk (786) | -0.79 | -0.59 | -0.44 | -0.37 (20/0 [< 0.001]) | **0.00** | **0.00** | 59% / 6% |
+
+Reading:
+
+- **The Nov 8 guess was right: the forced exit costs money.** The block end forces 46% of a healthy
+  half-life-20 pair's exits (18% at half-life 5). Carrying the position across blocks raises the median
+  Sharpe in every one of the 9 rows, on 18-20 of 20 seeds each. Even the fast healthy pair gains (0.63 to
+  0.82, 20 / 0), because carrying saves the forced exit and re-entry costs and lets reversions finish.
+- **It narrows the slow-pair loss but does not close it.** A healthy half-life-20 pair still has a median
+  Sharpe of -0.18 with carry (252-bar blocks: -0.08). z 2 / 0.5 on a spread this slow still pays costs for
+  little reversion inside 4 years. The fixed gate, which keeps a slow pair flat 94% of the time, still has
+  the best median at half-life 20 (about 0.00). It wins by not trading.
+- **Carry and the gate do different jobs, and together they are the best book at half-life 5 under a
+  break** (0.23 and 0.44 vs -0.16 and -0.07 for `off`). At half-lives 10-20 the gate dominates, and carry
+  adds little on top of it.
+- **Ships on.** The pre-registered rule passes: carry beats `off` in all three no-break rows (Holm p <
+  0.001 in each) and in all six break rows. `carry_over=True` is now the default of
+  `formation_trading_backtest`. Every earlier experiment script, the nested Kalman tuner and the
+  legacy-property tests pass `carry_over=False` explicitly, so the numbers published in earlier sections
+  still reproduce. Longer blocks also help (252-bar is the best ungated book at half-lives 10 and 20). They
+  stay a parameter, because the rule only covered carry.
+
+### What the tests check
+
+- Signals: flat start is the legacy book. A carried long or short is held until z reverts and flips on a
+  cross. The time stop counts bars held before the block. A NaN z still forces flat. Validation.
+- Walk-forward: carry is the default and `False` is the legacy book (flat at every block end). A slow pair
+  carries positions and the final block ends flat. The boundary bar earns exactly the carried return minus
+  the re-hedge or exit cost. Costs strictly reduce the carried book. A gated block closes a carried position.
+  Carry is causal under a late break. The Kalman hedge also carries.
+- The reading above at reduced scale (8 seeds, HL 5 and 20): `test_nov11_claims.py`.
+
+### Weaknesses
+
+- Still synthetic: one pair at a time, one break shape, 20 seeds per cell, and one cost level (10 bps per
+  leg). Carry's gain is partly a cost saving, so it would shrink with cheaper execution and grow with
+  dearer execution. That was not swept.
+- A carried position crosses a re-fit. The new block's hedge and z can disagree with the old ones (a
+  long carried into a block whose z says short flips at once and pays both legs). How often that happens
+  was not measured.
+- A healthy half-life-20 pair still loses after costs. The thresholds (z 2 / 0.5) were never re-chosen
+  for slow spreads, and a formation-chosen exit or entry was not tried with carry.
+- The nested Kalman tuner, the CUSUM halt and the time stop were not re-run with carry. The tuner is pinned
+  to the legacy book.
+- Longer blocks were reported but not shipped. Combining 252-bar blocks with carry was not tried.
+
 ## Install
 
 ```bash

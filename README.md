@@ -689,6 +689,86 @@ Reading:
   to see a break) was not tried.
 - The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
 
+## Nov 19 slice: carry at other cost levels, what happens at the re-fit, and the stops re-run with carry
+
+Nov 11 shipped `carry_over=True` at one cost level and left three questions: carry's gain is partly a cost
+saving, so does it survive cheaper execution; how often does a carried position flip at the re-fit (paying
+both legs twice); and do the time stop and the CUSUM halt, judged only on the forced-flat book, help once
+positions can live across blocks? Reproduce with `python scripts/run_nov19_experiments.py` (~30 s). Synthetic,
+seeded and offline; static OLS book, 252-bar formation, 63-bar blocks; 20 new seeds (1400-1419). The books,
+cost levels, scenarios and both decision rules were fixed in the script docstring before the first run.
+
+### Method
+
+| Piece | What it does |
+| --- | --- |
+| `windows["carry_bar0"]` | New diagnostic of `formation_trading_backtest`: what each block does on its first bar with a carried-in position: `hold`, `exit` (new z inside the exit band, or gated / halted) or `flip`. No number changes |
+| Cost sweep | `off` vs `carry` at 2.5 / 5 / 10 / 20 bps per leg (split evenly between spread and slippage), half-lives 5 / 10 / 20, no break and a random-walk break on bar 786. Rule: carry stays the default with no caveat only if it beats `off` on median Sharpe in every no-break row at every cost level |
+| Stops with carry | `carry` vs `carry + time stop` (formation-chosen OU multiple) vs `carry + CUSUM halt`, 10 bps. Rule: a stop is recommended with carry only if it beats `carry` on median Sharpe in every row |
+
+### Results: cost sweep (median Sharpe `off` / `carry`; wins / losses for carry on paired seeds; Holm-adjusted sign-test p over all 24 rows)
+
+| Half-life, scenario | 2.5 bps | 5 bps | 10 bps | 20 bps |
+| --- | ---: | ---: | ---: | ---: |
+| 5, no break | 2.05 / **2.14** (17/3 [0.013]) | 1.55 / **1.71** (18/2 [0.003]) | 0.67 / **0.87** (19/1 [< 0.001]) | -0.83 / **-0.69** (19/1 [< 0.001]) |
+| 5, random walk (786) | 0.70 / **0.71** (15/5 [0.083]) | 0.39 / **0.49** (19/1 [< 0.001]) | -0.27 / **-0.02** (20/0 [< 0.001]) | -1.19 / **-0.83** (20/0 [< 0.001]) |
+| 10, no break | 1.26 / **1.36** (18/2 [0.003]) | 0.88 / **1.01** (19/1 [< 0.001]) | -0.04 / **0.25** (20/0 [< 0.001]) | -1.18 / **-0.95** (20/0 [< 0.001]) |
+| 10, random walk (786) | 0.36 / **0.46** (14/6 [0.115]) | 0.02 / **0.19** (20/0 [< 0.001]) | -0.59 / **-0.28** (20/0 [< 0.001]) | -1.46 / **-1.00** (20/0 [< 0.001]) |
+| 20, no break | 0.77 / **0.93** (16/4 [0.047]) | 0.28 / **0.57** (19/1 [< 0.001]) | -0.45 / **-0.16** (19/1 [< 0.001]) | -1.41 / **-1.11** (19/1 [< 0.001]) |
+| 20, random walk (786) | 0.13 / **0.28** (16/4 [0.047]) | -0.27 / **0.00** (20/0 [< 0.001]) | -0.89 / **-0.51** (20/0 [< 0.001]) | -1.70 / **-1.18** (20/0 [< 0.001]) |
+
+### Results: what a carried position does on the new block's first bar (10 bps)
+
+| Half-life, scenario | carried blocks | hold | exit on bar 0 | flip |
+| --- | ---: | ---: | ---: | ---: |
+| 5, no break | 76 of 320 | 55 | 21 (28%) | 0 |
+| 5, random walk (786) | 131 of 320 | 102 | 29 (22%) | 0 |
+| 10, no break | 85 of 320 | 68 | 17 (20%) | 0 |
+| 10, random walk (786) | 136 of 320 | 106 | 30 (22%) | 0 |
+| 20, no break | 109 of 320 | 80 | 29 (27%) | 0 |
+| 20, random walk (786) | 151 of 320 | 114 | 37 (25%) | 0 |
+
+### Results: stops with carry (10 bps; median Sharpe, wins / losses vs `carry`)
+
+| Half-life, scenario | carry | carry + time stop | carry + CUSUM halt |
+| --- | ---: | ---: | ---: |
+| 5, no break | 0.87 | 0.83 (0/2) | 0.82 (0/7) |
+| 5, random walk (786) | -0.02 | -0.01 (2/0) | -0.14 (4/15) |
+| 10, no break | 0.25 | 0.25 (0/0) | 0.17 (0/9) |
+| 10, random walk (786) | -0.28 | -0.28 (1/0) | -0.42 (1/15) |
+| 20, no break | -0.16 | -0.16 (0/2) | -0.29 (0/11) |
+| 20, random walk (786) | -0.51 | -0.51 (1/0) | -0.61 (0/15) |
+
+Reading:
+
+- **Carry survives cheap execution, with a smaller gain.** It beats `off` in all 24 rows, so the rule passes and
+  the default stays with no cost caveat. The no-break gain is +0.09 to +0.16 Sharpe at 2.5 bps
+  against +0.20 to +0.29 at 10 bps, which fits the cost-saving story. At 2.5 bps the fast pair's
+  gain is small enough that 8 seeds cannot see it (the reduced-scale test checks that it stays within noise there).
+- **The flip worry does not happen here.** None of the 688 carried blocks flips on its first
+  bar; 17-37 per row exit at once because the re-fit put the spread back inside the exit band. A
+  flip needs the re-fit to move z by more than 2.5 sd, which this simulator never does.
+- **Neither stop helps with carry, so both stay off.** The time stop is nearly inert (0-2 seeds change per
+  row: carried positions rarely outlive the formation-chosen limit). The CUSUM halt loses in all 6 rows, even
+  under the break it was built for: with carry, a halt closes a position that would have reverted in the next
+  block.
+
+### What the tests check
+
+- `carry_bar0`: the label matches the carried-in position and the block's first position, is empty for the
+  legacy book, and a gated block reports an exit (`test_carry_bar0.py`).
+- The reading at reduced scale (8 seeds, half-lives 5 and 20) and the committed tables against both rules
+  (`test_nov19_claims.py`).
+
+### Weaknesses
+
+- Still one synthetic pair process. "No flips" is a property of this simulator's re-fits; a real pair with a
+  hedge ratio that jumps between formation windows could flip, and the diagnostic is there to count it.
+- Costs are linear in turnover; no impact, no fees that differ by leg, and borrow stays at 0.
+- A healthy half-life-20 pair still loses at 10 bps with carry (-0.16). It only turns positive
+  at 5 bps or below. Slow-spread thresholds (z 2 / 0.5) were again not re-chosen.
+- The nested Kalman tuner is still pinned to the forced-flat book.
+
 ## Nov 11 slice: carry positions across blocks instead of forcing them flat
 
 Nov 8 found that a healthy half-life-20 pair loses money ungated (median Sharpe -0.41 after costs). The guess

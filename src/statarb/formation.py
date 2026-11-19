@@ -281,7 +281,11 @@ def formation_trading_backtest(
     hedge and pays the re-hedge (or exit) cost of moving to the new one; borrow
     accrues over the gap. A gated block or a CUSUM halt closes a carried
     position on its first bar (gated) or alarm bar. The final block still ends
-    flat. ``windows["carried_in"]`` records the carried position.
+    flat. ``windows["carried_in"]`` records the carried position and
+    ``windows["carry_bar0"]`` what the new block did with it on its first bar:
+    ``"hold"``, ``"exit"`` (new z already inside the exit band, or gated / halted)
+    or ``"flip"`` (new z past the entry level on the other side, so both legs are
+    traded twice); empty when nothing was carried in.
     """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
@@ -383,6 +387,8 @@ def formation_trading_backtest(
                 pos[alarm:] = 0.0
         if not carry_over or last_block:
             pos[-1] = 0.0  # forced flat at block end
+        c_in = carry[0] if carry is not None else 0.0
+        bar0 = "" if c_in == 0.0 else ("hold" if pos[0] == c_in else ("exit" if pos[0] == 0.0 else "flip"))
         g, c, rh = _block_pnl(yv[t_sl], xv[t_sl], pos, beta, rate, n_legs, carry=carry)
         bw = _borrow_cost(yv[t_sl], xv[t_sl], pos, beta, borrow_bps, carry=carry)
         r = g - c - rh - bw
@@ -413,6 +419,7 @@ def formation_trading_backtest(
                 "gate_level": gate_level,
                 "gate_ref_half_life": ref_hl,
                 "carried_in": float(carry[0]) if carry is not None else 0.0,
+                "carry_bar0": bar0,
             }
         )
         if carry_over and pos[-1] != 0.0:

@@ -49,3 +49,25 @@ def test_committed_tables_follow_the_rule() -> None:
     assert len(s) == 3 * 2 * 4 and nov19.decide(s) == {"carry_stays_without_caveat": True, "rows_lost": []}
     t = pd.read_csv(ROOT / "results" / "nov19_carry_bar0.csv")
     assert (t.flip == 0).all() and (t.all_blocks == 320).all()
+
+
+@pytest.fixture(scope="module")
+def stops():
+    df = nov19.run_stops(seeds=range(1400, 1408), half_lives=(5.0, 20.0))
+    return nov19.summarise_stops(df).set_index(["half_life", "scenario", "book"])
+
+
+def test_cusum_halt_with_carry_loses_even_under_a_break(stops) -> None:
+    for hl in (5.0, 20.0):
+        for sc in ("no break", "random walk (786)"):
+            assert stops.loc[(hl, sc, "carry + CUSUM halt"), "median_sharpe"] < stops.loc[(hl, sc, "carry"), "median_sharpe"]
+
+
+def test_time_stop_with_carry_is_nearly_inert(stops) -> None:
+    ts = stops.xs("carry + time stop", level="book")
+    assert ((ts.wins + ts.losses) <= 3).all()
+
+
+def test_committed_stop_table_follows_the_rule() -> None:
+    s = pd.read_csv(ROOT / "results" / "nov19_carry_stops.csv")
+    assert nov19.decide_stops(s) == {"carry + time stop": False, "carry + CUSUM halt": False}

@@ -689,6 +689,73 @@ Reading:
   to see a break) was not tried.
 - The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
 
+## Nov 20 slice: carried positions when the hedge ratio jumps
+
+Nov 19 found that no carried position flips at the re-fit and said that came from a simulator whose hedge
+ratio never moves. This slice makes it move. `make_beta_jump_pair` keeps the same mean-reverting spread but
+moves the hedge ratio by a relative `jump` on bar 786, so formation windows that straddle the jump mis-fit
+and the re-fits after it move z. Reproduce with `python scripts/run_nov20_experiments.py` (~30 s) and
+`--posthoc`. Synthetic, seeded and offline. Static OLS book, 252-bar formation, 63-bar blocks, 10 bps per
+leg, 20 new seeds (1500-1519). The books, jumps, rule and a written expectation were fixed in the script
+docstring before the first run.
+
+Rule: `carry_over` keeps its no-caveat default only if it beats `off` on median Sharpe in every
+(half-life, jump) row of the OLS book. Expectation: flips appear at 2% and the slow pair loses.
+
+### Results (median Sharpe `off` / `carry`; wins / losses for carry; Holm-adjusted sign-test p over all 24 rows)
+
+| Half-life | no jump | 0.5% | 1% | 2% |
+| --- | ---: | ---: | ---: | ---: |
+| 5 | 0.52 / **0.73** (20/0 [< 0.001]) | 0.51 / **0.63** (19/1 [< 0.001]) | 0.39 / **0.57** (20/0 [< 0.001]) | 0.19 / **0.37** (20/0 [< 0.001]) |
+| 10 | 0.04 / **0.31** (20/0 [< 0.001]) | 0.00 / **0.30** (20/0 [< 0.001]) | -0.15 / **0.11** (19/1 [< 0.001]) | -0.22 / **0.05** (20/0 [< 0.001]) |
+| 20 | -0.54 / **-0.25** (20/0 [< 0.001]) | -0.55 / **-0.25** (19/1 [< 0.001]) | -0.67 / **-0.27** (19/1 [< 0.001]) | -0.64 / **-0.37** (20/0 [< 0.001]) |
+
+Carried blocks / exits on bar 0 / flips (carry book):
+
+| Half-life | no jump | 0.5% | 1% | 2% |
+| --- | ---: | ---: | ---: | ---: |
+| 5 | 73 / 20 / 0 | 79 / 22 / 0 | 83 / 23 / 0 | 93 / 24 / 0 |
+| 10 | 90 / 25 / 0 | 92 / 25 / 0 | 97 / 26 / 0 | 103 / 30 / 0 |
+| 20 | 114 / 37 / 0 | 123 / 36 / 0 | 121 / 36 / 0 | 128 / 40 / 0 |
+
+Post-hoc, 2% jump (`results/nov20_beta_jump_posthoc.csv`; decides nothing): median OLS hedge error and residual std / planted spread std per formation window:
+
+| Half-life | before the jump | straddles the jump | after the jump |
+| --- | ---: | ---: | ---: |
+| 5 | 1.2% / 0.98 | 7.4% / 1.49 | 1.4% / 0.90 |
+| 10 | 1.6% / 0.92 | 7.7% / 1.49 | 1.8% / 0.84 |
+| 20 | 2.1% / 0.82 | 7.3% / 1.50 | 2.2% / 0.76 |
+
+Reading:
+
+- **The expectation was wrong.** None of the 1,196 carried OLS blocks flips at any jump size. Carry beats `off` in all 12 OLS rows, so it keeps its default with no
+  caveat. The jump costs both books about the same (half-life 5 at 2%: `off` 0.52 → 0.19, `carry` 0.73 →
+  0.37), so carry's gain survives it.
+- **Why no flip.** A window that straddles the jump mis-fits by 3.5-6x the clean hedge error, and that
+  mis-fit lands in the residual: its std is ~1.5x the planted spread's. The next block's z shrinks by a
+  third, so a flip would need a ~3.7-sd move of the true spread rather than 2.5. A mis-fit OLS hedge mutes
+  z rather than throwing it across. The clean fit's own hedge error (1.2-2.1%) is already the size of a
+  1-2% jump, so small jumps disappear into fit noise.
+- The Kalman books carry at most 8 blocks per row and lose money in 23 of 24 book-rows. They are context only.
+
+### What the tests check
+
+- `make_beta_jump_pair` is the plain pair at jump 0 and moves only the post-break hedge, and a straddling
+  OLS fit has more than twice a clean one's error (`test_beta_jump.py`).
+- The reading at reduced scale (8 seeds, half-lives 5 and 20, jumps 0 and 2%), the committed tables against
+  the rule, and the post-hoc numbers (`test_nov20_claims.py`, `test_nov20_readme_numbers.py`).
+
+### Weaknesses
+
+- One kind of jump: a step in one hedge ratio, with the spread untouched. A jump that also re-rates the
+  spread's mean, or a drifting ratio, is not tested. "No flips" now holds for two simulators, not for real
+  pairs.
+- The z standardization uses the formation residual std, which is exactly what absorbs the jump. A book that
+  standardizes on a robust or recent-window std could flip, and is not tested.
+- Jumps above 2% were not in the frozen design, so this says nothing about larger ones.
+- Linear costs, borrow 0, half-life-20 still loses after costs. The nested Kalman tuner is still pinned to the
+  forced-flat book.
+
 ## Nov 19 slice: carry at other cost levels, what happens at the re-fit, and the stops re-run with carry
 
 Nov 11 shipped `carry_over=True` at one cost level and left three questions: carry's gain is partly a cost

@@ -689,6 +689,56 @@ Reading:
   to see a break) was not tried.
 - The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
 
+## Nov 20 second slice: why the Kalman books lose, and a slower hedge
+
+The Nov 20 Kalman books lost money in 23 of 24 book-rows. This slice asks why. It tests a filter whose hedge ratio
+drifts 100x slower (`q_beta` 1e-8 instead of the 1e-6 default) against the default filter and the static OLS book.
+Pairs come from `make_beta_jump_pair` (no jump and a 2% jump at bar 786). Other settings: 252-bar formation, 63-bar
+blocks, 10 bps per leg, carry on, 20 new seeds (1600-1619). Reproduce with
+`python scripts/run_nov20b_experiments.py` (~15 s) and `--posthoc`.
+
+**The first guess was wrong, and was dropped before any evaluation seed was run.** A draft of the script blamed the
+random-walk intercept (`q_alpha`) for turning the innovation into white noise. On dev seeds 1-3, fixing the intercept
+moved z by at most 0.011, and z had lag-1 autocorrelation ~0.94. The hedge drift did matter: the block z's correlation
+with the planted spread was 0.72-0.89 at the default `q_beta` and 0.94-0.96 at 1e-8 (`tests/test_kalman_drift_scale.py`).
+The design and rules below were then fixed in the script docstring:
+
+- **H1:** the slow hedge beats default Kalman on median Sharpe in all 6 rows, with Holm p < 0.05 in at least 4.
+- **H2:** the slow hedge beats OLS in all three 2%-jump rows; otherwise the Kalman book stays context only.
+- `Q_BETA`'s default does not change either way, so every earlier Kalman number stays reproducible.
+
+### Results (median Sharpe default Kalman / slow Kalman / OLS; slow-vs-default wins/losses [Holm p]; slow-vs-OLS wins/losses [Holm p])
+
+| Half-life | no jump | 2% jump |
+| --- | --- | --- |
+| 5 | -0.07 / 0.72 / 0.89 (19/1 [< 0.001]; 2/18 [0.002]) | 0.04 / 0.64 / 0.71 (19/1 [< 0.001]; 4/16 [0.024]) |
+| 10 | -0.48 / 0.15 / 0.43 (18/2 [< 0.001]; 1/19 [< 0.001]) | -0.43 / 0.04 / 0.32 (19/1 [< 0.001]; 3/17 [0.010]) |
+| 20 | -0.51 / -0.35 / -0.14 (13/7 [0.263]; 3/17 [0.010]) | -0.62 / -0.27 / -0.11 (19/1 [< 0.001]; 6/14 [0.115]) |
+
+- **H1 passes.** The slow hedge beats the default filter in all 6 rows, with Holm p < 0.05 in 5 of them (half-life
+  20 with no jump is 13/7). At half-life 5 with no jump, it goes from -0.07 to
+  0.72.
+- **H2 fails, so the Kalman book stays context only.** OLS is ahead of the slow hedge in every row, not only the 2%
+  ones. The expectation written before the run (H1 passes, H2 fails) held.
+
+### Post-hoc: how well z tracks the planted spread (decides nothing; `results/nov20b_tracking_posthoc.csv`)
+
+Median over seeds of the mean block correlation between z and the true spread (default Kalman / slow Kalman / OLS):
+
+| Half-life | no jump | 2% jump |
+| --- | --- | --- |
+| 5 | 0.861 / 0.984 / 0.990 | 0.834 / 0.933 / 0.938 |
+| 10 | 0.792 / 0.969 / 0.979 | 0.761 / 0.906 / 0.918 |
+| 20 | 0.721 / 0.935 / 0.965 | 0.679 / 0.870 / 0.892 |
+
+The Sharpe order follows the tracking order in every cell. Even with a 2% jump, the slow filter tracks no better than
+an OLS hedge re-fitted every block (0.933 vs 0.938 at half-life 5). A
+moving hedge only pays when the hedge ratio moves more within one 63-bar block than it does here. A larger or a
+trending beta move is the obvious next stress; it is not run here.
+
+Weaknesses: the default filter's tuning (`q_beta` 1e-6) was never fitted, and neither was 1e-8. One synthetic pair
+family, one jump shape, 20 seeds.
+
 ## Nov 20 slice: carried positions when the hedge ratio jumps
 
 Nov 19 found that no carried position flips at the re-fit and said that came from a simulator whose hedge

@@ -112,5 +112,50 @@ def main(out: Path | None = None) -> dict:
     return d
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and "--posthoc" not in sys.argv:
     main()
+
+
+# --- Post-hoc (after the first run; decides nothing) -------------------------------------------
+# The written expectation failed: 0 flips at every jump, and carry wins every row. This reads why,
+# straight from the formation fits: for each 252-bar formation window, the OLS hedge error against
+# the true hedge ratio on the block's first bar, and the residual std in units of the planted
+# spread std. A flip needs the re-fit to move z by more than z_enter + z_exit = 2.5 sd; a residual
+# std inflated by the jump shrinks every z, which works against a flip.
+FORMATION, TRADING = 252, 63
+
+
+def posthoc(seeds=SEEDS, half_lives=HALF_LIVES, jumps=JUMPS) -> pd.DataFrame:
+    rows = []
+    for hl in half_lives:
+        for j in jumps:
+            for s in seeds:
+                p = make_beta_jump_pair(N, break_at=BREAK_AT, jump=j, half_life=hl, seed=s)
+                y, x, bp = p.y.to_numpy(), p.x.to_numpy(), p.beta_path.to_numpy()
+                for start in range(FORMATION, N - TRADING + 1, TRADING):
+                    w = slice(start - FORMATION, start)
+                    X = np.column_stack([np.ones(FORMATION), x[w]])
+                    coef, *_ = np.linalg.lstsq(X, y[w], rcond=None)
+                    resid = y[w] - X @ coef
+                    rows.append({"half_life": hl, "jump": j, "seed": s, "block_start": start,
+                                 "window": "straddles jump" if start - FORMATION < BREAK_AT < start else
+                                           ("after jump" if start - FORMATION >= BREAK_AT else "before jump"),
+                                 "hedge_err": abs(coef[1] - bp[start]) / bp[start],
+                                 "resid_sd_ratio": resid.std(ddof=2) / p.sigma_spread})
+    d = pd.DataFrame(rows)
+    return (d.groupby(["half_life", "jump", "window"])
+             .agg(windows=("hedge_err", "size"), hedge_err_median=("hedge_err", "median"),
+                  resid_sd_ratio_median=("resid_sd_ratio", "median"))
+             .reset_index())
+
+
+def main_posthoc(out: Path | None = None) -> pd.DataFrame:
+    t = posthoc()
+    out = out or Path(__file__).resolve().parents[1] / "results"
+    t.to_csv(out / "nov20_beta_jump_posthoc.csv", index=False, float_format="%.6f")
+    print(t.round(4).to_string(index=False))
+    return t
+
+
+if __name__ == "__main__" and "--posthoc" in sys.argv:
+    main_posthoc()

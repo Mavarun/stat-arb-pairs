@@ -59,3 +59,21 @@ def test_kalman_books_carry_almost_nothing() -> None:
     k = s[s.hedge == "kalman"]
     assert b[b.hedge == "kalman"]["carried_blocks"].max() <= 8
     assert (k.carry < 0).sum() >= 10  # the Kalman book loses money in almost every row either way
+
+
+def test_posthoc_straddling_fits_inflate_the_residual() -> None:
+    t = pd.read_csv(RES / "nov20_beta_jump_posthoc.csv").set_index(["half_life", "jump", "window"])
+    for hl in (5.0, 10.0, 20.0):
+        before = t.loc[(hl, 0.02, "before jump")]
+        st = t.loc[(hl, 0.02, "straddles jump")]
+        assert st.hedge_err_median > 3 * before.hedge_err_median
+        assert st.resid_sd_ratio_median > 1.45
+        # the clean fit's own hedge error is already 1.2-2.2%, the size of a 1-2% jump
+        assert 0.01 < before.hedge_err_median < 0.025
+        # windows fully after the jump fit as well as windows before it
+        assert abs(t.loc[(hl, 0.02, "after jump")].hedge_err_median - t.loc[(hl, 0.0, "after jump")].hedge_err_median) < 0.001
+
+
+def test_posthoc_recomputes_at_small_scale() -> None:
+    t = nov20.posthoc(seeds=range(1500, 1504), half_lives=(5.0,), jumps=(0.02,)).set_index("window")
+    assert t.loc["straddles jump", "resid_sd_ratio_median"] > 1.3

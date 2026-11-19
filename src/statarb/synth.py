@@ -102,6 +102,36 @@ def make_ou_pair(
 BREAK_KINDS = ("none", "random_walk", "level_shift")
 
 
+def make_beta_jump_pair(
+    n: int = 1000,
+    *,
+    break_at: int,
+    jump: float,
+    beta: float = 1.5,
+    seed: int = 0,
+    **kwargs,
+) -> SyntheticPair:
+    """``make_ou_pair`` whose hedge ratio jumps by ``jump`` (relative) at bar ``break_at``.
+
+    ``beta_t = beta`` before ``break_at`` and ``beta * (1 + jump)`` from it on. The
+    spread stays the same mean-reverting OU, so the pair is still a pair; only the
+    hedge ratio a formation fit must find has moved. With ``jump = 0`` the result is
+    bit-identical to ``make_ou_pair`` for the same seed, and every ``jump`` shares the
+    x leg and the spread path (common random numbers across jump sizes).
+
+    A formation window that straddles the jump fits a blend of the two ratios, so the
+    next window's re-fit can move z a long way: the case the Nov 19 slice could not
+    produce (no carried position flipped there).
+    """
+    if not 1 <= int(break_at) < n:
+        raise ValueError("break_at must be in [1, n)")
+    if not np.isfinite(jump) or jump <= -1.0:
+        raise ValueError("jump must be finite and > -1")
+    path = np.full(n, float(beta))
+    path[int(break_at):] = float(beta) * (1.0 + float(jump))
+    return make_ou_pair(n, beta=beta, beta_path=path, seed=seed, **kwargs)
+
+
 def make_broken_pair(
     n: int = 1000,
     *,

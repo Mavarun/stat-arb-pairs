@@ -102,5 +102,38 @@ def main() -> None:
     print({"H1": d["H1"], "H2": d["H2"]})
 
 
+def tracking(seeds=SEEDS, half_lives=HALF_LIVES, jumps=JUMPS) -> pd.DataFrame:
+    """POST-HOC (written after the decision; decides nothing): per arm, the mean over blocks of
+    corr(trading-block z, planted spread) and the block z's std, the dev-seed mechanism re-read
+    on the evaluation seeds."""
+    from statarb.formation import _window_signal
+    from statarb.kalman import Q_ALPHA, Q_BETA
+
+    out = []
+    for hl in half_lives:
+        for j in jumps:
+            for s in seeds:
+                p = make_beta_jump_pair(N, break_at=BREAK_AT, jump=j, half_life=hl, seed=s)
+                y, x, sp = p.y.to_numpy(), p.x.to_numpy(), p.spread.to_numpy()
+                for arm, kw in ARMS.items():
+                    cs, sds, st = [], [], 0
+                    while st + 252 + 63 <= N:
+                        f, t = slice(st, st + 252), slice(st + 252, st + 315)
+                        z, _, _ = _window_signal(y[f], x[f], y[t], x[t], kw["hedge"], kw.get("q_beta", Q_BETA),
+                                                 kw.get("q_alpha", Q_ALPHA))
+                        cs.append(np.corrcoef(z, sp[t])[0, 1])
+                        sds.append(z.std())
+                        st += 63
+                    out.append({"half_life": hl, "jump": j, "seed": s, "arm": arm,
+                                "corr_true": float(np.mean(cs)), "z_sd": float(np.mean(sds))})
+    df = pd.DataFrame(out)
+    return df.groupby(["half_life", "jump", "arm"], sort=False)[["corr_true", "z_sd"]].median().reset_index()
+
+
 if __name__ == "__main__":
-    main()
+    if "--posthoc" in sys.argv:
+        t = tracking()
+        t.round(4).to_csv(RESULTS / "nov20b_tracking_posthoc.csv", index=False)
+        print(t.round(3).to_string(index=False))
+    else:
+        main()

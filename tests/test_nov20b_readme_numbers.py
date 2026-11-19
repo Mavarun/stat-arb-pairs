@@ -24,7 +24,7 @@ def _p(p: float) -> str:
 def test_order():
     heads = [h for h in README.splitlines() if h.startswith("## ")]
     i = next(k for k, h in enumerate(heads) if h.startswith("## Nov 20 second slice:"))
-    assert heads[i + 1].startswith("## Nov 20 slice:")
+    assert heads[i + 1].startswith("## Nov 20 slice:") and heads[i - 1].startswith("## Nov 20 third slice:")
 
 
 def test_result_cells_and_decisions():

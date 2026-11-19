@@ -689,6 +689,33 @@ Reading:
   to see a break) was not tried.
 - The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
 
+## Nov 20 third slice: larger hedge-ratio jumps, and a moving hedge still does not pay
+
+The second slice's tracking reading said a moving hedge would only pay if beta moved more inside one block than a 2%
+jump does. This slice tests that directly with 5% and 10% jumps, using the same three books (default Kalman, slow
+Kalman `q_beta` 1e-8, OLS) and 20 new seeds (1700-1719). Reproduce with `python scripts/run_nov20c_experiments.py`
+(~15 s). The rule, fixed in the script docstring: "a moving hedge pays" may be claimed only if the slow hedge beats
+OLS in ≥ 2 of 3 rows at 10%, with Holm p < 0.05. The expectation written before the run was a pass at 10% for
+half-lives 10 and 20.
+
+### Results (median Sharpe default Kalman / slow Kalman / OLS; slow-vs-OLS wins/losses [Holm p over 6 rows])
+
+| Half-life | 5% jump | 10% jump |
+| --- | --- | --- |
+| 5 | -0.05 / 0.45 / 0.34 (8/12 [1.000]) | -0.20 / 0.29 / 0.22 (6/14 [0.692]) |
+| 10 | -0.31 / -0.10 / 0.08 (6/14 [0.692]) | -0.31 / -0.18 / -0.08 (6/14 [0.692]) |
+| 20 | -0.51 / -0.45 / -0.18 (9/11 [1.000]) | -0.43 / -0.50 / -0.28 (7/13 [0.790]) |
+
+- **The rule fails; the expectation was wrong.** The slow hedge loses to OLS on more seeds than it wins in all 6 rows,
+  and no row reaches Holm p < 0.05 in its favour. At half-life 5 its median is higher (0.45 vs 0.34 at 5%), but it
+  wins only 8 and 6 of 20 seeds there. A few large wins move the median while most seeds lose.
+- The default (faster) Kalman hedge is worse still: it loses to OLS in every row.
+- Up to a 10% jump, the static OLS hedge re-fitted every 63 bars remains the better hedge in this simulator. All three
+  books lose money at half-life 20.
+
+Weaknesses: one jump shape (a single step), so a trending beta, where re-fitting lags every block, is untested. 20
+seeds per row.
+
 ## Nov 20 second slice: why the Kalman books lose, and a slower hedge
 
 The Nov 20 Kalman books lost money in 23 of 24 book-rows. This slice asks why. It tests a filter whose hedge ratio

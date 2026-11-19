@@ -111,5 +111,73 @@ def main(out: Path | None = None) -> dict:
     return d
 
 
+
+
+# --- Part 2 (rule fixed before its first run): the stops Nov 11 never re-ran with carry ----------
+# The OU time stop (formation-chosen multiple, ``time_stop_multiple="auto"``) and the CUSUM halt were
+# tuned and judged on the forced-flat book. With carry a position can live across blocks, so a stop
+# could matter more. Same seeds, half-lives and scenarios, 10 bps per leg. Rule: a stop is
+# recommended with carry only if ``carry + stop`` beats ``carry`` on median Sharpe in every row
+# (no-break and break). Both stay off by default either way unless that holds.
+STOP_BOOKS = {
+    "carry": {"carry_over": True},
+    "carry + time stop": {"carry_over": True, "use_time_stop": True, "time_stop_multiple": "auto"},
+    "carry + CUSUM halt": {"carry_over": True, "cusum_halt": True},
+}
+
+
+def run_stops(seeds=SEEDS, half_lives=HALF_LIVES, scenarios=SCENARIOS) -> pd.DataFrame:
+    rows = []
+    for hl in half_lives:
+        for label, kind, break_at in scenarios:
+            for s in seeds:
+                p = make_broken_pair(N, break_at=break_at, kind=kind, half_life=hl, shift_sigmas=4.0, seed=s)
+                for book, kw in STOP_BOOKS.items():
+                    r = formation_trading_backtest(p.y, p.x, hedge="ols", **kw)
+                    rows.append({"half_life": hl, "scenario": label, "seed": s, "book": book, "sharpe": r.sharpe,
+                                 "trades": r.trades, "cost": r.cost_paid})
+    return pd.DataFrame(rows)
+
+
+def summarise_stops(df: pd.DataFrame) -> pd.DataFrame:
+    out = []
+    for (hl, sc), g in df.groupby(["half_life", "scenario"], sort=False):
+        piv = g.pivot(index="seed", columns="book", values="sharpe")
+        for book in STOP_BOOKS:
+            row = {"half_life": hl, "scenario": sc, "book": book, "median_sharpe": piv[book].median(),
+                   "mean_trades": g[g.book == book].trades.mean()}
+            if book != "carry":
+                d = piv[book] - piv["carry"]
+                w, lo = int((d > 1e-12).sum()), int((d < -1e-12).sum())
+                row.update(wins=w, losses=lo, sign_p=binomtest(w, w + lo, 0.5).pvalue if w + lo else 1.0)
+            out.append(row)
+    s = pd.DataFrame(out)
+    s["holm_p"] = holm(s.get("sign_p", pd.Series(np.nan, index=s.index)).to_numpy())
+    return s
+
+
+def decide_stops(s: pd.DataFrame) -> dict:
+    base = s[s.book == "carry"].set_index(["half_life", "scenario"]).median_sharpe
+    out = {}
+    for book in STOP_BOOKS:
+        if book == "carry":
+            continue
+        b = s[s.book == book].set_index(["half_life", "scenario"]).median_sharpe
+        out[book] = bool((b > base).all())
+    return out
+
+
+def main_stops(out: Path | None = None) -> dict:
+    s = summarise_stops(run_stops())
+    out = out or Path(__file__).resolve().parents[1] / "results"
+    out.mkdir(exist_ok=True)
+    s.to_csv(out / "nov19_carry_stops.csv", index=False, float_format="%.6f")
+    print(s.round(3).to_string(index=False))
+    d = decide_stops(s)
+    print("stops recommended with carry:", d)
+    return d
+
+
 if __name__ == "__main__":
     main()
+    main_stops()

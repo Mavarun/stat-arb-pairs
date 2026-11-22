@@ -132,6 +132,41 @@ def make_beta_jump_pair(
     return make_ou_pair(n, beta=beta, beta_path=path, seed=seed, **kwargs)
 
 
+def make_beta_trend_pair(
+    n: int = 1000,
+    *,
+    trend_from: int,
+    drift_per_year: float,
+    beta: float = 1.5,
+    bars_per_year: int = 252,
+    seed: int = 0,
+    **kwargs,
+) -> SyntheticPair:
+    """``make_ou_pair`` whose hedge ratio trends linearly from bar ``trend_from`` on.
+
+    ``beta_t = beta`` before ``trend_from`` and
+    ``beta * (1 + drift_per_year * (t - trend_from) / bars_per_year)`` from it on, so the
+    ratio moves by ``drift_per_year`` (relative to ``beta``) every ``bars_per_year`` bars
+    and never settles. The spread stays the same mean-reverting OU. Unlike
+    ``make_beta_jump_pair``, no formation window is ever clean after ``trend_from``: a
+    fit on the last ``F`` bars estimates roughly the ratio of ``F / 2`` bars ago, so every
+    re-fit lags. With ``drift_per_year = 0`` the result is bit-identical to
+    ``make_ou_pair`` for the same seed, and every drift shares the x leg and the spread
+    path (common random numbers across drifts).
+    """
+    if not 0 <= int(trend_from) < n:
+        raise ValueError("trend_from must be in [0, n)")
+    if not np.isfinite(drift_per_year):
+        raise ValueError("drift_per_year must be finite")
+    if int(bars_per_year) < 1:
+        raise ValueError("bars_per_year must be >= 1")
+    t = np.arange(n, dtype=float) - int(trend_from)
+    path = float(beta) * (1.0 + float(drift_per_year) * np.clip(t, 0.0, None) / int(bars_per_year))
+    if np.any(path <= 0):
+        raise ValueError("drift_per_year drives the hedge ratio to <= 0 inside the sample")
+    return make_ou_pair(n, beta=beta, beta_path=path, seed=seed, **kwargs)
+
+
 def make_broken_pair(
     n: int = 1000,
     *,

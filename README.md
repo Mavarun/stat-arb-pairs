@@ -689,6 +689,81 @@ Reading:
   to see a break) was not tried.
 - The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
 
+## Nov 22 slice: a trending hedge ratio, and neither a moving hedge nor a shorter look-back earns a claim
+
+The Nov 20 slices tested one-off jumps and named a *trending* hedge ratio, where every re-fit lags, as the untested
+case where a moving hedge could pay. `make_beta_trend_pair` keeps the same OU spread but moves the ratio linearly by
+`drift` per year (relative to 1.5) from bar 252 on, so no formation window is ever clean again. Four books on the
+same walk-forward setup (252-bar formation unless noted, 63-bar blocks, carry on, 10 bps per leg, Sharpe net of
+costs on out-of-sample blocks): `ols` (default), `ols_f126` (126-bar formation), `kalman` (defaults) and
+`kalman_qb8` (`q_beta` 1e-8). Drifts {0, 2%, 5%} per year, half-lives {5, 10, 20}, 20 new seeds (1800-1819).
+Reproduce with `python scripts/run_nov22_experiments.py` (~25 s) and `--posthoc`.
+
+Fixed in the script docstring before the first evaluation run (Holm over all 27 challenger-vs-OLS sign tests):
+
+- **H1:** a Kalman arm beats `ols` on median Sharpe in >= 2 of 3 half-life rows at 5%/yr, with Holm p < 0.05.
+- **H2:** `ols_f126` beats `ols` by the same test.
+- **H3:** a passing arm that loses to `ols` in all three zero-drift rows is called trend-only, not a default.
+- A dev check on seeds 1-2 (never used for a decision) showed a 10%/yr drift sends every book below zero, so the
+  drifts stop at 5%. **Expectation:** H1 passes for the default Kalman hedge; H2 fails.
+
+### Results (median Sharpe `ols` / `ols_f126` / `kalman` / `kalman_qb8`; each challenger's wins/losses vs `ols` [Holm p over 27 tests])
+
+| Half-life | no drift | 2% per year | 5% per year |
+| --- | --- | --- | --- |
+| 5 | 0.65 / 0.48 (4/16 [0.189]) / -0.02 (0/20 [< 0.001]) / 0.55 (1/19 [0.001]) | 0.19 / 0.22 (11/9 [1.000]) / -0.20 (2/18 [0.009]) / 0.23 (11/9 [1.000]) | -0.61 / -0.47 (9/11 [1.000]) / -0.24 (19/1 [0.001]) / -0.56 (15/5 [0.579]) |
+| 10 | 0.21 / -0.08 (1/19 [0.001]) / -0.32 (2/18 [0.009]) / 0.09 (2/18 [0.009]) | -0.24 / -0.36 (4/16 [0.189]) / -0.63 (3/17 [0.049]) / -0.29 (11/9 [1.000]) | -0.95 / -1.00 (7/13 [1.000]) / -0.69 (15/5 [0.579]) / -0.92 (8/12 [1.000]) |
+| 20 | -0.23 / -0.54 (2/18 [0.009]) / -0.58 (5/15 [0.579]) / -0.39 (6/14 [1.000]) | -0.68 / -0.84 (3/17 [0.049]) / -0.90 (3/17 [0.049]) / -0.66 (12/8 [1.000]) | -1.22 / -1.51 (5/15 [0.579]) / -0.99 (13/7 [1.000]) / -1.19 (12/8 [1.000]) |
+
+- **H1 fails; the expectation was wrong.** The default Kalman hedge is ahead of OLS on median in all three 5%/yr
+  rows, but clears Holm only at half-life 5 (19/1). At half-lives 10 and 20 it wins 15/5 and 13/7, which is not
+  enough after the correction. The slow Kalman hedge passes nowhere.
+- **H2 fails.** The 126-bar OLS book clears Holm in no row and loses with Holm p < 0.05 in three.
+- **Every book loses money at 5%/yr.** The default Kalman hedge "wins" by losing less (-0.24 vs -0.61 at half-life 5).
+  Costs are not why: at half-life 5 the OLS book trades less under the trend (median 21 -> 8 trades) and pays less
+  (total cost 0.084 -> 0.032), so the loss is gross.
+- **The default Kalman hedge is expensive when nothing trends.** It loses to OLS in every zero-drift and 2%/yr row
+  (half-life 5, no drift: 0.65 -> -0.02, 0/20). No default changes: `FORMATION` stays 252
+  and `Q_BETA` stays 1e-6, so every earlier number reproduces. Nothing ships.
+
+### Post-hoc readings (decide nothing)
+
+Hedge error per trading block, relative to the planted ratio (`results/nov22_tracking_posthoc.csv`, medians over
+seeds, on the trading blocks all arms share):
+
+| Half-life, 5%/yr | `ols` | `ols_f126` | `kalman` | `kalman_qb8` |
+| --- | ---: | ---: | ---: | ---: |
+| 5: mean abs error / signed error / corr(z, spread) | 0.130 / -0.004 / 0.72 | 0.095 / -0.006 / 0.75 | 0.133 / -0.015 / 0.67 | 0.143 / -0.010 / 0.80 |
+| 20: mean abs error / signed error / corr(z, spread) | 0.132 / -0.004 / 0.57 | 0.100 / -0.007 / 0.61 | 0.129 / -0.016 / 0.49 | 0.143 / -0.010 / 0.65 |
+
+- **A trend does not look like a lag here.** Every arm's hedge is off by 9.5-14% of the ratio, but the signed error is
+  close to zero. With x a random walk, an OLS fit cannot tell a trending ratio from movement in x, so the error
+  changes sign from window to window. The "re-fits lag" picture in the Nov 20 weaknesses was too simple.
+- **Sharpe does not follow tracking at 5%/yr, unlike Nov 20.** The default Kalman z tracks the planted spread worst
+  in every 5%/yr row, yet has the best median Sharpe there. It also trades less on a stable pair (median 7.5 vs 21 trades
+  at half-life 5, no drift). This slice does not isolate why it loses less under the trend.
+- **The short look-back's one better median was a window artifact.** The frozen `ols_f126` arm also traded bars
+  126-251, before the trend started and before `ols` trades anything. Scored on bars 252+ only
+  (`results/nov22_common_span_posthoc.csv`), it loses more seeds than it wins in all 9 rows (half-life 5 at 5%/yr:
+  -0.63 vs -0.61, 6/14). This flaw in the frozen design flattered the arm, and H2 still failed.
+
+### What the tests check
+
+- `make_beta_trend_pair` equals the plain pair at zero drift, trends linearly from the start bar, shares the spread
+  across drifts, and a 126-bar fit lags a trend less than a 252-bar one in the mean (`test_beta_trend.py`).
+- The frozen design, fresh seeds and the three rules on hand-made rows (`test_nov22_protocol.py`); one cell
+  reproduces and the verdicts recompute (`test_nov22_claims.py`); both post-hoc readings (`test_nov22_posthoc.py`);
+  every number above (`test_nov22_readme_numbers.py`).
+
+### Weaknesses
+
+- Still synthetic, one pair at a time, one linear trend shape, 20 seeds, and a median of 3-29 trades per four-year run, so
+  medians move with a few trades.
+- The `ols_f126` arm's trading span differed from the others in the frozen design. The common-span re-score is post hoc.
+- Neither Kalman `q_beta` was fitted to the trend. A tuned or trend-aware filter (a local-linear-trend state) was not
+  tried, and at 5%/yr every book loses money anyway.
+- Half-life 20 still loses after costs in every book and row.
+
 ## Nov 20 third slice: larger hedge-ratio jumps, and a moving hedge still does not pay
 
 The second slice's tracking reading said a moving hedge would only pay if beta moved more inside one block than a 2%
@@ -1027,7 +1102,7 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 
 ```
 src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank, breakwatch, gatecal
-scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py, run_nov03_experiments.py, run_nov03_calibration.py, run_nov08_experiments.py, run_nov08_calibration.py
+scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py, run_nov03_experiments.py, run_nov03_calibration.py, run_nov08_experiments.py, run_nov08_calibration.py, run_nov11..nov20c_experiments.py, run_nov22_experiments.py
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)

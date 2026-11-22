@@ -121,5 +121,44 @@ def main() -> None:
     print({k: v for k, v in d.items() if k != "table"})
 
 
+def tracking(seeds=SEEDS, half_lives=HALF_LIVES, drifts=DRIFTS) -> pd.DataFrame:
+    """POST-HOC (written after the decisions; decides nothing): per arm, the median over seeds of
+    the block-mean relative hedge error (block-mean hedge ratio vs the planted ratio, signed,
+    so a positive value is a hedge that lags an upward trend), its absolute value, and the
+    block-mean corr(trading-block z, planted spread)."""
+    import numpy as np
+
+    from statarb.formation import _window_signal
+    from statarb.kalman import Q_ALPHA, Q_BETA
+
+    out = []
+    for hl in half_lives:
+        for d in drifts:
+            for s in seeds:
+                p = make_beta_trend_pair(N, trend_from=TREND_FROM, drift_per_year=d, half_life=hl, seed=s)
+                y, x, sp, bp = p.y.to_numpy(), p.x.to_numpy(), p.spread.to_numpy(), p.beta_path.to_numpy()
+                for arm, kw in ARMS.items():
+                    f = kw.get("formation", 252)
+                    lag, ae, cs, st = [], [], [], 252 - f  # every arm trades the same blocks as ols
+                    while st + f + 63 <= N:
+                        fw, tw = slice(st, st + f), slice(st + f, st + f + 63)
+                        z, b, _ = _window_signal(y[fw], x[fw], y[tw], x[tw], kw["hedge"], kw.get("q_beta", Q_BETA),
+                                                 kw.get("q_alpha", Q_ALPHA))
+                        e = float(np.mean(bp[tw] - b) / 1.5)
+                        lag.append(e)
+                        ae.append(float(np.mean(np.abs(bp[tw] - b)) / 1.5))
+                        cs.append(np.corrcoef(z, sp[tw])[0, 1])
+                        st += 63
+                    out.append({"half_life": hl, "drift": d, "seed": s, "arm": arm, "hedge_lag": float(np.mean(lag)),
+                                "hedge_abs_err": float(np.mean(ae)), "corr_true": float(np.mean(cs))})
+    df = pd.DataFrame(out)
+    return df.groupby(["half_life", "drift", "arm"], sort=False)[["hedge_lag", "hedge_abs_err", "corr_true"]].median().reset_index()
+
+
 if __name__ == "__main__":
-    main()
+    if "--posthoc" in sys.argv:
+        t = tracking()
+        t.round(4).to_csv(RESULTS / "nov22_tracking_posthoc.csv", index=False)
+        print(t.round(3).to_string(index=False))
+    else:
+        main()

@@ -155,10 +155,38 @@ def tracking(seeds=SEEDS, half_lives=HALF_LIVES, drifts=DRIFTS) -> pd.DataFrame:
     return df.groupby(["half_life", "drift", "arm"], sort=False)[["hedge_lag", "hedge_abs_err", "corr_true"]].median().reset_index()
 
 
+def common_span(seeds=SEEDS, half_lives=HALF_LIVES, drifts=DRIFTS) -> pd.DataFrame:
+    """POST-HOC (decides nothing): the frozen ``ols_f126`` arm starts trading at bar 126, so its
+    Sharpe includes two blocks (bars 126-251) that ``ols`` never trades, both before the trend
+    starts. This re-scores ``ols_f126`` on bars 252+ only (the span every other arm trades) and
+    re-runs its paired sign test against ``ols``, Holm over these 9 rows only."""
+    from statarb.formation import _sharpe
+
+    rows = []
+    for hl in half_lives:
+        for d in drifts:
+            for s in seeds:
+                p = make_beta_trend_pair(N, trend_from=TREND_FROM, drift_per_year=d, half_life=hl, seed=s)
+                r = formation_trading_backtest(p.y, p.x, **ARMS["ols_f126"])
+                rets = r.returns.dropna()
+                rows.append({"half_life": hl, "drift": d, "seed": s, "arm": "ols_f126_common",
+                             "sharpe": _sharpe(rets[rets.index >= p.y.index[252]])})
+    df = pd.DataFrame(rows)
+    base = pd.read_csv(RESULTS / "nov22_beta_trend.csv")
+    base = base[(base.arm == "ols") & base.seed.isin(list(seeds)) & base.half_life.isin(half_lives)
+                & base.drift.isin(drifts)][["half_life", "drift", "seed", "arm", "sharpe"]]
+    both = pd.concat([base, df], ignore_index=True).rename(columns={"drift": "jump"})
+    t = B.paired(both, "ols", "ols_f126_common").rename(columns={"jump": "drift"})
+    return t
+
+
 if __name__ == "__main__":
     if "--posthoc" in sys.argv:
         t = tracking()
         t.round(4).to_csv(RESULTS / "nov22_tracking_posthoc.csv", index=False)
         print(t.round(3).to_string(index=False))
+        c = common_span()
+        c.round(4).to_csv(RESULTS / "nov22_common_span_posthoc.csv", index=False)
+        print(c.round(3).to_string(index=False))
     else:
         main()

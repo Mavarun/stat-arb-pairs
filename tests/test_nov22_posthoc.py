@@ -35,3 +35,19 @@ def test_sharpe_order_does_not_follow_tracking_at_5pct():
         r = TR.loc[(hl, 0.05)]
         assert r.corr_true.idxmin() == "kalman"
         assert med[(hl, 0.05, "kalman")] > med[(hl, 0.05, "ols")]
+
+
+def test_common_span_rescore_of_the_short_lookback():
+    c = pd.read_csv(ROOT / "results" / "nov22_common_span_posthoc.csv").set_index(["half_life", "drift"])
+    assert len(c) == 9
+    # on bars 252+ only, the 126-bar OLS book loses more seeds than it wins in every row ...
+    assert (c.losses > c.wins).all()
+    # ... including the 5%/yr rows where the frozen arm's median looked better at half-life 5
+    df = pd.read_csv(ROOT / "results" / "nov22_beta_trend.csv")
+    frozen = df[(df.arm == "ols_f126") & (df.half_life == 5.0) & (df.drift == 0.05)].sharpe.median()
+    assert frozen > c.loc[(5.0, 0.05), "ols"] > c.loc[(5.0, 0.05), "ols_f126_common"]
+
+
+def test_common_span_cell_reproduces():
+    fresh = E.common_span(seeds=range(1800, 1806), half_lives=(10.0,), drifts=(0.0,))
+    assert fresh.losses.iloc[0] > fresh.wins.iloc[0]

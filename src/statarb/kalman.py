@@ -1,4 +1,4 @@
-"""Kalman-filter dynamic hedge ratio (random-walk alpha and beta).
+"""Kalman-filter dynamic hedge ratio (random-walk alpha and beta; a local-linear-trend variant below).
 
 State-space model::
 
@@ -92,3 +92,66 @@ def static_hedge_path(y: pd.Series, x: pd.Series, *, warmup: int = WARMUP) -> pd
     out = pd.Series(float(ols.params[1]), index=both.index, name="beta")
     out.iloc[:warmup] = np.nan
     return out
+
+
+Q_DRIFT = 1e-12
+P_DRIFT0 = (1.5 * 0.10 / 252) ** 2
+
+
+def kalman_trend_hedge(
+    y: pd.Series,
+    x: pd.Series,
+    *,
+    q_beta: float = 1e-8,
+    q_alpha: float = Q_ALPHA,
+    q_drift: float = Q_DRIFT,
+    p_drift0: float = P_DRIFT0,
+    r: float | None = None,
+    warmup: int = WARMUP,
+) -> pd.DataFrame:
+    """Local-linear-trend hedge: the ratio carries its own per-bar drift.
+
+    State ``[alpha_t, beta_t, g_t]`` with ``beta_t = beta_{t-1} + g_{t-1} + w``,
+    ``g_t = g_{t-1} + u`` (``u ~ N(0, q_drift)``), so a ratio that trends linearly is a
+    *constant* in the drift state, which the random-walk filter can only chase. Same
+    causal OLS start as :func:`kalman_hedge`; ``g_0 = 0`` with prior variance ``p_drift0``
+    (default: a 10%/yr move of a 1.5 ratio, one standard deviation). Returns the same
+    columns as :func:`kalman_hedge` plus ``drift`` (filtered g_t, per bar).
+    """
+    both = pd.concat(
+        [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
+    ).dropna()
+    n = len(both)
+    if warmup < 10 or n <= warmup:
+        raise ValueError("Need warmup >= 10 and more observations than warmup.")
+    if min(q_beta, q_alpha, q_drift, p_drift0) < 0:
+        raise ValueError("variances must be >= 0")
+    yv, xv = both["y"].to_numpy(), both["x"].to_numpy()
+    ols = sm.OLS(yv[:warmup], sm.add_constant(xv[:warmup], has_constant="add")).fit()
+    theta = np.array([float(ols.params[0]), float(ols.params[1]), 0.0])
+    P = np.zeros((3, 3))
+    P[:2, :2] = np.asarray(ols.cov_params(), dtype=float)
+    P[2, 2] = float(p_drift0)
+    r = float(ols.scale) if r is None else float(r)
+    F = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1.0]])
+    Q = np.diag([float(q_alpha), float(q_beta), float(q_drift)])
+
+    cols = ["alpha_prior", "beta_prior", "innovation", "innov_var", "zscore", "alpha", "beta", "drift"]
+    out = np.full((n, len(cols)), np.nan)
+    for t in range(warmup, n):
+        theta_p = F @ theta
+        P_prior = F @ P @ F.T + Q
+        H = np.array([1.0, xv[t], 0.0])
+        e = yv[t] - H @ theta_p
+        S = float(H @ P_prior @ H + r)
+        K = P_prior @ H / S
+        out[t, 0:2] = theta_p[:2]
+        out[t, 2] = e
+        out[t, 3] = S
+        out[t, 4] = e / np.sqrt(S)
+        theta = theta_p + K * e
+        P = P_prior - np.outer(K, H) @ P_prior
+        P = 0.5 * (P + P.T)
+        out[t, 5:7] = theta[:2]
+        out[t, 7] = theta[2]
+    return pd.DataFrame(out, index=both.index, columns=cols)

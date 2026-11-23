@@ -254,6 +254,7 @@ def formation_trading_backtest(
     gate_quantile: float | None = None,
     gate_ref_half_life: float | None = None,
     carry_over: bool = True,
+    exec_delay: int = 0,
 ) -> FormationResult:
     """Roll formation/trading windows over the whole sample; see module docstring.
 
@@ -296,6 +297,11 @@ def formation_trading_backtest(
     ``"hold"``, ``"exit"`` (new z already inside the exit band, or gated / halted)
     or ``"flip"`` (new z past the entry level on the other side, so both legs are
     traded twice); empty when nothing was carried in.
+    ``exec_delay`` (0 by default = every earlier slice) executes each block's book that many bars
+    after the close it was decided on: the decided path is shifted right inside the block and the
+    first ``exec_delay`` bars keep the carried-in position. Every stop, gate and halt acts on the
+    decided path, so it fires late too. The final block's forced flat on its last bar is still
+    executed on time (slightly optimistic for the delayed book).
     """
     both = pd.concat(
         [pd.Series(y, dtype=float).rename("y"), pd.Series(x, dtype=float).rename("x")], axis=1
@@ -306,6 +312,8 @@ def formation_trading_backtest(
         raise ValueError("Sample shorter than one formation + trading window.")
     if borrow_bps < 0:
         raise ValueError("borrow_bps must be >= 0")
+    if int(exec_delay) != exec_delay or exec_delay < 0:
+        raise ValueError("exec_delay must be a non-negative integer")
     if gate_p is not None and gate_quantile is not None:
         raise ValueError("gate_p and gate_quantile are exclusive")
     yv, xv = both["y"].to_numpy(), both["x"].to_numpy()
@@ -395,6 +403,9 @@ def formation_trading_backtest(
             if alarm is not None:
                 halt_bar = float(alarm)
                 pos[alarm:] = 0.0
+        if exec_delay:
+            d = min(int(exec_delay), len(pos))
+            pos = np.concatenate([np.full(d, c_pos), pos[: len(pos) - d]])
         if not carry_over or last_block:
             pos[-1] = 0.0  # forced flat at block end
         c_in = carry[0] if carry is not None else 0.0

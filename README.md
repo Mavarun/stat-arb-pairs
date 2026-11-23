@@ -689,6 +689,70 @@ Reading:
   to see a break) was not tried.
 - The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
 
+## Nov 24 slice: a hedge filter that models the drift, and it still does not pay
+
+Nov 22 left a trend-aware filter untried. `kalman_trend_hedge` (hedge `"kalman_llt"` in the walk-forward book) adds
+a per-bar drift state to the hedge ratio (`beta_t = beta_(t-1) + g_(t-1)`), so a linear trend is a constant it can
+learn rather than a walk it chases. Same pairs and book as Nov 22 (trend from bar 252, 252-bar formation, 63-bar
+blocks, carry on, 10 bps per leg, Sharpe net of costs out of sample). Arms: `ols` (default), `kalman` (defaults) and
+`kalman_llt` (`q_beta` 1e-8, `q_drift` 1e-12, drift prior sd = 10%/yr of a 1.5 ratio). 20 new seeds (1900-1919).
+Reproduce with `python scripts/run_nov24_experiments.py` (~20 s) and `--posthoc`.
+
+Fixed in the script docstring before the first evaluation run (Holm over all 18 sign tests):
+
+- **H1:** `kalman_llt` beats `ols` on median Sharpe in >= 2 of 3 half-life rows at 5%/yr, with Holm p < 0.05.
+- **H2:** `kalman_llt` beats the default `kalman` by the same test.
+- **H3:** a passing arm that loses to `ols` in all three zero-drift rows is trend-only, not a default.
+- A dev check on seeds 1-2 found `q_drift` in {0, 1e-12, 1e-11} gave the same Sharpe to two decimals in all eight
+  cells, so only one LLT arm is tested. **Expectation:** H1 passes, H2 fails, H3 calls it trend-only.
+
+### Results (median Sharpe `ols` / `kalman` / `kalman_llt`; LLT wins/losses vs `ols` [Holm p]; vs `kalman` [Holm p])
+
+| Half-life | no drift | 2% per year | 5% per year |
+| --- | --- | --- | --- |
+| 5 | 0.83 / 0.10 / -0.31 (0/20 [< 0.001]; 1/19 [< 0.001]) | 0.48 / 0.13 / -0.12 (1/19 [< 0.001]; 3/17 [0.018]) | -0.44 / -0.22 / -0.26 (12/8 [1.000]; 7/13 [1.000]) |
+| 10 | 0.50 / -0.15 / -0.74 (0/20 [< 0.001]; 1/19 [< 0.001]) | -0.14 / -0.35 / -0.67 (1/19 [< 0.001]; 2/18 [0.004]) | -0.84 / -0.48 / -0.73 (10/10 [1.000]; 5/15 [0.248]) |
+| 20 | -0.09 / -0.53 / -1.12 (1/19 [< 0.001]; 1/19 [< 0.001]) | -0.62 / -0.70 / -1.19 (2/18 [0.004]; 2/18 [0.004]) | -1.25 / -0.77 / -1.01 (12/8 [1.000]; 5/15 [0.248]) |
+
+- **H1 fails; the expectation was wrong.** The LLT hedge is ahead of OLS on median in all three 5%/yr rows, but
+  only by winning 12/8, 10/10 and 12/8 seeds (Holm p 1.000). It does not separate from OLS where it was built to.
+- **H2 fails.** It is behind the default random-walk Kalman hedge on median in all 9 rows.
+- **It is expensive when the ratio does not trend.** It loses to OLS with Holm p < 0.01 in every zero and 2%/yr
+  row (half-life 5, no drift: 0.83 -> -0.31, 0/20). Nothing ships and no default changes, so every earlier number
+  reproduces.
+
+### Post-hoc reading (decides nothing)
+
+At 5%/yr (`results/nov24_drift_learning_posthoc.csv`, medians over seeds): the LLT drift state at the end of each
+trading block as a multiple of the planted per-bar drift, the block-mean hedge error relative to the planted ratio,
+and median trades.
+
+| Half-life | drift state / planted | hedge error `ols` / `kalman` / `kalman_llt` | trades `ols` / `kalman` / `kalman_llt` |
+| --- | ---: | --- | --- |
+| 5 | 2.20 | 0.129 / 0.128 / 0.126 | 9.5 / 10 / 10 |
+| 10 | 2.25 | 0.129 / 0.128 / 0.125 | 6 / 8 / 9 |
+| 20 | 2.23 | 0.131 / 0.126 / 0.124 | 6 / 6 / 7 |
+
+- **The drift state overshoots.** Re-started from the formation OLS every block with a zero drift, it ends each
+  63-bar block at about 2.2x the planted drift, and its hedge error is only 2-5% below OLS. With x a random walk, the
+  extra state mostly re-labels movement in x as drift, the same identification problem the Nov 22 reading found.
+
+### What the tests check
+
+- The filter is causal, reduces to `kalman_hedge` with a zero drift prior, rejects bad input, and tracks a 5%/yr
+  trend better than the slow random-walk filter (`test_kalman_trend.py`); the book accepts `"kalman_llt"` and OLS is
+  untouched by `q_drift` (`test_formation_llt.py`).
+- Frozen design and fresh seeds, the rules on hand-made rows, one cell reproduces, verdicts recompute
+  (`test_nov24_claims.py`); the post-hoc reading recomputes (`test_nov24_posthoc.py`); every number above
+  (`test_nov24_readme_numbers.py`).
+
+### Weaknesses
+
+- Still synthetic, one pair, one linear trend, 20 seeds and a few trades per run.
+- The filter is re-started every block, so the drift state never sees more than 63 bars. A filter that carries its
+  state across blocks was not tested, and would need its own pre-registered run.
+- Half-life 20 still loses after costs in every book and row.
+
 ## Nov 22 slice: a trending hedge ratio, and neither a moving hedge nor a shorter look-back earns a claim
 
 The Nov 20 slices tested one-off jumps and named a *trending* hedge ratio, where every re-fit lags, as the untested
@@ -1102,7 +1166,7 @@ or `jupyter nbconvert --to notebook --execute notebooks/pairs_trading.ipynb`. Sa
 
 ```
 src/statarb/     cointegration, signals, backtest, data, synth, ou, kalman, screening, formation, rescreen, nested, rank, breakwatch, gatecal
-scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py, run_nov03_experiments.py, run_nov03_calibration.py, run_nov08_experiments.py, run_nov08_calibration.py, run_nov11..nov20c_experiments.py, run_nov22_experiments.py
+scripts/         run_oct05_experiments.py, run_oct09_experiments.py, run_oct14_experiments.py, run_oct20_experiments.py, run_oct29_experiments.py, run_nov03_experiments.py, run_nov03_calibration.py, run_nov08_experiments.py, run_nov08_calibration.py, run_nov11..nov20c_experiments.py, run_nov22_experiments.py, run_nov24_experiments.py
 tests/           synthetic-data unit tests
 notebooks/       walk-forward KO/PEP (or sample) pipeline
 data/            make_sample.py + sample_ko_pep.csv (sample, not live)

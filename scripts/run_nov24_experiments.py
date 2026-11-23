@@ -111,5 +111,50 @@ def main() -> None:
     print({k: v for k, v in d.items() if k != "table"})
 
 
+def drift_learning(seeds=SEEDS, half_lives=HALF_LIVES, drift: float = DECISION_DRIFT) -> pd.DataFrame:
+    """POST-HOC (written after the decisions; decides nothing): per half-life at ``drift``, the
+    median over seeds of (a) the LLT drift state at the last bar of each trading block as a
+    fraction of the planted per-bar drift, (b) the block-mean absolute hedge error relative to
+    the planted ratio for ``ols``, ``kalman`` and ``kalman_llt``, and (c) median trades."""
+    import numpy as np
+
+    from statarb.kalman import Q_ALPHA, kalman_trend_hedge
+    from statarb.formation import _window_signal
+
+    true_g = 1.5 * drift / 252
+    rows = []
+    for hl in half_lives:
+        for s in seeds:
+            p = make_beta_trend_pair(N, trend_from=TREND_FROM, drift_per_year=drift, half_life=hl, seed=s)
+            y, x, bp = p.y.to_numpy(), p.x.to_numpy(), p.beta_path.to_numpy()
+            frac, err = [], {a: [] for a in ARMS}
+            st = 0
+            while st + 252 + 63 <= N:
+                fw, tw = slice(st, st + 252), slice(st + 252, st + 315)
+                kf = kalman_trend_hedge(pd.Series(np.concatenate([y[fw], y[tw]])), pd.Series(np.concatenate([x[fw], x[tw]])),
+                                        q_beta=1e-8, q_alpha=Q_ALPHA, q_drift=1e-12, warmup=252)
+                frac.append(float(kf["drift"].iloc[-1]) / true_g)
+                for a, kw in ARMS.items():
+                    _, b, _ = _window_signal(y[fw], x[fw], y[tw], x[tw], kw["hedge"], kw.get("q_beta", 1e-6), Q_ALPHA,
+                                             kw.get("q_drift", 1e-12))
+                    err[a].append(float(np.mean(np.abs(bp[tw] - b)) / 1.5))
+                st += 63
+            row = {"half_life": hl, "seed": s, "drift_frac": float(np.median(frac))}
+            row.update({f"abs_err_{a}": float(np.mean(v)) for a, v in err.items()})
+            rows.append(row)
+    df = pd.DataFrame(rows)
+    out = df.groupby("half_life").median(numeric_only=True).drop(columns="seed").reset_index()
+    res = pd.read_csv(RESULTS / "nov24_llt_hedge.csv")
+    tr = res[res.drift == drift].groupby(["half_life", "arm"]).trades.median().unstack()
+    for a in ARMS:
+        out[f"trades_{a}"] = out.half_life.map(tr[a])
+    return out
+
+
 if __name__ == "__main__":
-    main()
+    if "--posthoc" in sys.argv:
+        t = drift_learning()
+        t.round(4).to_csv(RESULTS / "nov24_drift_learning_posthoc.csv", index=False)
+        print(t.round(3).to_string(index=False))
+    else:
+        main()

@@ -15,6 +15,10 @@ filtered bar by bar through the trading block. The signal is the innovation
 z-score (prior state, so it has not seen bar t); the hedge held over (t, t+1]
 is the filtered ``beta[t]``.
 
+Local linear trend ("kalman_llt", Nov 24): the same, with ``kalman_trend_hedge``
+(a per-bar drift state on beta, ``q_drift``); callers pass the ``q_beta`` they want
+(the Nov 24 slice uses 1e-8 so the drift state, not the walk, carries a trend).
+
 Both books use the same ``mean_reversion_positions`` rule and thresholds. With
 ``carry_over=False`` (the book of every slice before Nov 11) they start flat at
 the first trading bar and are forced flat on the last one, so no position or
@@ -55,7 +59,7 @@ import pandas as pd
 import statsmodels.api as sm
 
 from .backtest import _max_drawdown, _sharpe
-from .kalman import Q_ALPHA, Q_BETA, kalman_hedge
+from .kalman import Q_ALPHA, Q_BETA, Q_DRIFT, kalman_hedge, kalman_trend_hedge
 from .params import ANNUALIZATION, BORROW_BPS, N_LEGS, SLIPPAGE_BPS, SPREAD_BPS, Z_ENTER, Z_EXIT
 from .breakwatch import H_ALARM, K_SLACK, cusum_alarm
 from .signals import mean_reversion_positions
@@ -96,7 +100,7 @@ class FormationResult:
 
 def _window_signal(
     yf: np.ndarray, xf: np.ndarray, yt: np.ndarray, xt: np.ndarray, hedge: str,
-    q_beta: float, q_alpha: float,
+    q_beta: float, q_alpha: float, q_drift: float = Q_DRIFT,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Return (z, beta) on the trading block and the formation beta."""
     ols = sm.OLS(yf, sm.add_constant(xf, has_constant="add")).fit()
@@ -111,7 +115,12 @@ def _window_signal(
         x = pd.Series(np.concatenate([xf, xt]))
         kf = kalman_hedge(y, x, q_beta=q_beta, q_alpha=q_alpha, warmup=len(yf))
         return kf["zscore"].to_numpy()[len(yf):], kf["beta"].to_numpy()[len(yf):], b
-    raise ValueError("hedge must be 'ols' or 'kalman'")
+    if hedge == "kalman_llt":
+        y = pd.Series(np.concatenate([yf, yt]))
+        x = pd.Series(np.concatenate([xf, xt]))
+        kf = kalman_trend_hedge(y, x, q_beta=q_beta, q_alpha=q_alpha, q_drift=q_drift, warmup=len(yf))
+        return kf["zscore"].to_numpy()[len(yf):], kf["beta"].to_numpy()[len(yf):], b
+    raise ValueError("hedge must be 'ols', 'kalman' or 'kalman_llt'")
 
 
 def _block_pnl(
@@ -233,6 +242,7 @@ def formation_trading_backtest(
     n_legs: int = N_LEGS,
     q_beta: float = Q_BETA,
     q_alpha: float = Q_ALPHA,
+    q_drift: float = Q_DRIFT,
     use_time_stop: bool = False,
     time_stop_multiple: float | str = 3.0,
     borrow_bps: float = BORROW_BPS,
@@ -331,7 +341,7 @@ def formation_trading_backtest(
         f_sl = slice(start, start + formation)
         t_sl = slice(start + formation, start + formation + trading)
         z, beta, beta_f = _window_signal(
-            yv[f_sl], xv[f_sl], yv[t_sl], xv[t_sl], hedge, q_beta, q_alpha
+            yv[f_sl], xv[f_sl], yv[t_sl], xv[t_sl], hedge, q_beta, q_alpha, q_drift
         )
         max_hold = None
         k_used = float("nan")

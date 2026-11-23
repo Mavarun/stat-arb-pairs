@@ -61,7 +61,7 @@ In-sample (train) metrics are shown because they are the usual way to fool yours
 
 - Prices are daily adjusted closes. Cointegration is tested in **levels**, not log-levels and not returns.
 - The residual of a static OLS hedge is the traded spread. \u03b2 does not walk inside a window except when `expanding_walk_forward` re-fits on later train origins.
-- We can trade at the close after computing z from that close, and the next day's move is ours. That is optimistic versus next-open or VWAP.
+- We can trade at the close after computing z from that close, and the next day's move is ours. That is optimistic versus next-open or VWAP. Measured on Nov 24: one close late cuts the median Sharpe of half-life 5 pairs from 0.92 to 0.52 (see the Nov 24 second slice).
 - Dollar book is 1 unit of *y* vs \u03b2 units of *x*, scaled by lagged gross notional. Not share-count integer, not dollar-neutral unless \u03b2 \u2248 y/x.
 - Costs scale linearly with \\|\u0394position\\| and hit both legs. No borrow fee on the short, no locate, no halt.
 
@@ -688,6 +688,41 @@ Reading:
 - The gate is still a 252-bar test; a longer look-back for the test only (more power on slow spreads, slower
   to see a break) was not tried.
 - The Kalman hedge and the CUSUM halt were not re-run at slower half-lives.
+
+## Nov 24 slice (second): executing one close late, and the slow pairs were already losing
+
+Every slice since Oct 5 lists same-close execution as optimistic (Assumptions) and none measured it.
+`exec_delay=1` in `formation_trading_backtest` executes each block's decided book one close later. The carried
+position is held through the gap, and stops, gates and halts fire late too. Default book (OLS, carry on, 252-bar
+formation, 63-bar blocks, 10 bps per leg) on stable pairs (no drift), half-lives 5 / 10 / 20, 20 new seeds
+(2000-2019). `python scripts/run_nov24b_experiments.py` (~4 s); `results/nov24b_exec_delay.csv`.
+
+Rules fixed before the run (Holm over the 3 sign tests): **H1** the delayed median Sharpe is > 0 in all 3 rows;
+**H2** in >= 2 rows the delayed median is > 25% below the same-close median, delay worse with Holm p < 0.05.
+Expectation (dev seeds 1-2): H1 holds, H2 passes. **Both were wrong.**
+
+| half-life | median Sharpe, same close | one close late | delay better / worse | Holm p |
+| ---: | ---: | ---: | ---: | ---: |
+| 5 | 0.917 | 0.521 | 1 / 19 | <0.001 |
+| 10 | 0.358 | 0.199 | 6 / 14 | 0.231 |
+| 20 | -0.058 | -0.112 | 10 / 10 | 1.000 |
+
+- **H1 fails, but not because of the delay:** the half-life 20 row already loses money at the close. With 10 bps
+  per leg its median gross P&L (0.041) is below its median cost (0.046).
+- **H2 fails:** only half-life 5 is material and significant (-43%). Half-life 10 drops 44%, but 14 / 6 is not
+  significant after Holm.
+- **The delay costs gross P&L, not turnover.** Trades are identical on 57 of 60 pair-runs (one fewer on 3).
+  Median gross falls 0.130 -> 0.115 at half-life 5 while costs stay put. That is why a 12% gross haircut becomes a
+  43% Sharpe haircut.
+- No default changes (`exec_delay` stays 0, so every earlier slice reproduces). Read the headline Sharpe numbers of
+  earlier slices as same-close upper bounds; for fast pairs (half-life 5) the one-close-late figure is about
+  half.
+
+### Weaknesses
+
+- One delay (a full close), stable pairs only, 20 seeds. Next-open execution would sit between the two and needs
+  open prices the synthetic generator does not produce.
+- The final block's forced flat is still executed on time, so the delayed book is slightly flattered.
 
 ## Nov 24 slice: a hedge filter that models the drift, and it still does not pay
 
